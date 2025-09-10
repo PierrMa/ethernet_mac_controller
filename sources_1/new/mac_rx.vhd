@@ -60,32 +60,50 @@ architecture Behavioral of mac_rx is
     constant LENGTH_LEN : integer := 2;
     constant PAYLOAD_MAX_LEN : integer := 1500;
     constant FCS_LEN : integer := 4;
-    constant CRC_POLY_INV : std_logic_vector(31 downto 0) := x"EDB88320";
     
     -- TYPES
-    type FSM_type is (IDLE,PREAMB, RCV_DEST, RCV_SRC, RCV_LEN, RCV_PAYLOAD, RCV_FCS, GET_BYTE, COMPUTE_CRC, CHECK_CRC);
+    type FSM_type is (IDLE,PREAMB, RCV_DEST, RCV_SRC, RCV_LEN, RCV_PAYLOAD, RCV_FCS, CHECK_CRC);
     
     -- SIGNALS
     -- for the conversion from nibble to byte
     signal high_nibble : std_logic_vector(3 downto 0);
-    signal rgmii_rx_d8 : std_logic_vector(7 downto 0);
-    signal byte_valid : std_logic;
+    signal rgmii_rx_d8, rgmii_rx_d8_sync : std_logic_vector(7 downto 0);
+    signal byte_valid, byte_valid_sync1, byte_valid_sync2 : std_logic;
     -- for the reception
     signal actual_st, next_st : FSM_type;
-    signal rx_dv : std_logic;  -- ongoing frame transfert
-    signal phy_error : std_logic; -- error get from phy in rgmii_rx_ctl
+    signal rx_dv, rx_dv_sync1, rx_dv_sync2 : std_logic;  -- ongoing frame transfert
+    signal phy_error, phy_error_sync1, phy_error_sync2 : std_logic; -- error get from phy in rgmii_rx_ctl
     signal reception_error : std_logic; -- error during reception
     signal index : integer range 0 to NB_BYTE_MAX;
-    signal dest_addr : std_logic_vector(DEST_LEN*8-1 downto 0);
-    signal src_addr : std_logic_vector(SRC_LEN*8-1 downto 0);
     signal data_len : std_logic_vector(LENGTH_LEN*8-1 downto 0);
-    signal payload : std_logic_vector(PAYLOAD_MAX_LEN*8-1 downto 0);
     signal fcs : std_logic_vector(FCS_LEN*8-1 downto 0);
-    signal frame : std_logic_vector((DEST_LEN+SRC_LEN+LENGTH_LEN+PAYLOAD_MAX_LEN)*8-1 downto 0);
     signal byte : std_logic_vector(7 downto 0);
     signal bit_count : integer range 0 to 8 := 0;
     signal crc_processed : std_logic_vector(31 downto 0);
-    signal frame_length_s : std_logic_vector(15 downto 0);
+    signal rx_start_comb, rx_start_seq : std_logic; 
+    signal rx_end_comb, rx_end_seq : std_logic; 
+    
+    -- FUNCTIONS
+    function compute_crc32(
+        data  : std_logic_vector(7 downto 0);
+        crc_in : std_logic_vector(31 downto 0)
+    ) return std_logic_vector is
+        variable crc  : unsigned(31 downto 0);
+        variable din  : unsigned(7 downto 0);
+    begin
+        crc := unsigned(crc_in);
+        din := unsigned(data);
+    
+        for i in 0 to 7 loop
+            if ((crc(0) xor din(i)) = '1') then
+                crc := crc(30 downto 0)&'0' xor x"EDB88320"; -- polynôme inversé
+            else
+                crc := crc(30 downto 0)&'0';
+            end if;
+        end loop;
+    
+        return std_logic_vector(crc);
+    end function;
 begin
 
     -- Nibble to byte
@@ -115,6 +133,29 @@ begin
         if falling_edge(rgmii_rx_clk) then phy_error <= rx_dv xor rgmii_rx_ctl; end if;
     end process;
     
+    -- crossing clock domain from rgmii_rx_clk to clk
+    process(clk,rst)
+    begin
+        if rst = '1' then 
+            byte_valid_sync1 <= '0';
+            byte_valid_sync2 <= '0';
+            rx_dv_sync1 <= '0';
+            rx_dv_sync2 <= '0';
+            phy_error_sync1 <= '0';
+            phy_error_sync2 <= '0';
+        elsif rising_edge(clk) then
+            byte_valid_sync1 <= byte_valid;
+            byte_valid_sync2 <= byte_valid_sync1;
+            if byte_valid_sync2 = '1' then
+                rgmii_rx_d8_sync <= rgmii_rx_d8;
+            end if;
+            rx_dv_sync1      <= rx_dv;
+            rx_dv_sync2      <= rx_dv_sync1;
+            phy_error_sync1  <= phy_error;
+            phy_error_sync2  <= phy_error_sync1;
+        end if;
+    end process;
+    
     -- FSM to handle reception
     process (clk,rst)
     begin
@@ -132,12 +173,13 @@ begin
             rx_data_out <= (others=>'0');
             rx_start <= '0';
             rx_end <= '0';
-            frame_length_s <= (others=>'0');
+            frame_length <= (others=>'0');
             crc_ok <= '0';
             reception_error <= '0';
             rx_data_valid <= '0';
+            crc_processed <= (others=>'1');
             
-            if byte_valid = '1' and rx_dv = '1' then 
+            if byte_valid_sync2 = '1' and rx_dv_sync2 = '1' then 
                 index <= index + 1;
                 next_st <= PREAMB;
             else
@@ -145,11 +187,13 @@ begin
             end if;
         
         when PREAMB => -- detect preamble and sfd
-            if byte_valid = '1' and rx_dv = '1' then 
-                if rgmii_rx_d8 = x"D5" and index = 8 then -- receive SFD
+            if byte_valid_sync2 = '1' and rx_dv_sync2 = '1' then 
+                if rgmii_rx_d8_sync = x"D5" and index = PREAMB_LEN+SFD_LEN then -- receive SFD
                     index <= 0; 
+                    reception_error <= '0';
+                    crc_processed <= (others=>'1'); -- initialize CRC with ones
                     next_st <= RCV_DEST;
-                elsif rgmii_rx_d8 = x"55" and index<8 then -- receive preamble
+                elsif rgmii_rx_d8_sync = x"55" and index<PREAMB_LEN+SFD_LEN then -- receive preamble
                     index <= index + 1;
                 end if;
             else
@@ -158,23 +202,18 @@ begin
             end if;
         
         when RCV_DEST => -- parse destination address
-            if rx_dv = '1' and byte_valid = '1' then
-                if index = 0 then 
-                    rx_start <= '1'; -- start signal for system
-                else 
-                    rx_start <= '0'; 
-                end if;
-                
-                if index < DEST_LEN-1 then 
-                    dest_addr <= dest_addr((DEST_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
-                    rx_data_out <= rgmii_rx_d8; -- transmit the byte
+            if rx_dv_sync2 = '1' and byte_valid_sync2 = '1' then                
+                if index < DEST_LEN-1 then
+                    rx_data_out <= rgmii_rx_d8_sync; -- transmit the byte
                     rx_data_valid <= '1';
+                    crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= index + 1;
                 elsif index = DEST_LEN-1 then
-                    dest_addr <= dest_addr((DEST_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
-                    rx_data_out <= rgmii_rx_d8; -- transmit the byte
+                    rx_data_out <= rgmii_rx_d8_sync; -- transmit the byte
                     rx_data_valid <= '1';
+                    crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= 0;
+                    reception_error <= '0';
                     next_st <= RCV_SRC;
                 elsif index >DEST_LEN-1 then 
                     index <= 0;
@@ -190,17 +229,18 @@ begin
             end if;
             
         when RCV_SRC => -- parse source address
-            if rx_dv = '1' and byte_valid = '1' then
+            if rx_dv_sync2 = '1' and byte_valid_sync2 = '1' then
                 if index < SRC_LEN-1 then 
-                    src_addr <= src_addr((SRC_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
-                    rx_data_out <= rgmii_rx_d8; -- transmit the byte
+                    rx_data_out <= rgmii_rx_d8_sync; -- transmit the byte
                     rx_data_valid <= '1';
+                    crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= index + 1;
                 elsif index = SRC_LEN-1 then
-                    src_addr <= src_addr((SRC_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
-                    rx_data_out <= rgmii_rx_d8; -- transmit the byte
+                    rx_data_out <= rgmii_rx_d8_sync; -- transmit the byte
                     rx_data_valid <= '1';
+                    crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= 0;
+                    reception_error <= '0';
                     next_st <= RCV_LEN;
                 elsif index >SRC_LEN-1 then 
                     index <= 0;
@@ -216,17 +256,20 @@ begin
             end if;
             
         when RCV_LEN => -- parse length
-            if rx_dv = '1' and byte_valid = '1' then
+            if rx_dv_sync2 = '1' and byte_valid_sync2 = '1' then
                 if index < LENGTH_LEN-1 then 
-                    data_len <= data_len((LENGTH_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
-                    rx_data_out <= rgmii_rx_d8; -- transmit the byte
+                    data_len <= data_len((LENGTH_LEN-1)*8-1 downto 0) & rgmii_rx_d8_sync;
+                    rx_data_out <= rgmii_rx_d8_sync; -- transmit the byte
                     rx_data_valid <= '1';
+                    crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= index + 1;
                 elsif index = LENGTH_LEN-1 then
-                    data_len <= data_len((LENGTH_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
-                    rx_data_out <= rgmii_rx_d8; -- transmit the byte
+                    data_len <= data_len((LENGTH_LEN-1)*8-1 downto 0) & rgmii_rx_d8_sync;
+                    rx_data_out <= rgmii_rx_d8_sync; -- transmit the byte
                     rx_data_valid <= '1';
+                    crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= 0;
+                    reception_error <= '0';
                     next_st <= RCV_PAYLOAD;
                 elsif index >LENGTH_LEN-1 then 
                     index <= 0;
@@ -242,18 +285,18 @@ begin
             end if;
             
         when RCV_PAYLOAD => -- parse payload
-            if rx_dv = '1' and byte_valid = '1' then
+            if rx_dv_sync2 = '1' and byte_valid_sync2 = '1' then
                 if index < to_integer(unsigned(data_len)) - 1 then
-                    payload <= payload((PAYLOAD_MAX_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
-                    rx_data_out <= rgmii_rx_d8; -- transmit the byte
+                    rx_data_out <= rgmii_rx_d8_sync; -- transmit the byte
                     rx_data_valid <= '1';
+                    crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= index + 1;
                 elsif index = to_integer(unsigned(data_len)) - 1 then
-                    payload <= payload((PAYLOAD_MAX_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
-                    rx_data_out <= rgmii_rx_d8; -- transmit the byte
+                    rx_data_out <= rgmii_rx_d8_sync; -- transmit the byte
                     rx_data_valid <= '1';
-                    rx_end <= '1';
+                    crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= 0;
+                    reception_error <= '0';
                     next_st <= RCV_FCS;
                 elsif index > to_integer(unsigned(data_len)) - 1 then
                     index <= 0;
@@ -270,71 +313,56 @@ begin
             
         when RCV_FCS => -- parse FCS
             rx_end <= '0';
-            frame <= dest_addr&src_addr&data_len&payload((to_integer(unsigned(data_len)))*8-1 downto 0);
-            frame_length_s <= std_logic_vector(to_unsigned(DEST_LEN+SRC_LEN+LENGTH_LEN+to_integer(unsigned(data_len)),16));
+            frame_length <= std_logic_vector(to_unsigned(DEST_LEN+SRC_LEN+LENGTH_LEN+to_integer(unsigned(data_len)),16));
             rx_data_valid <= '0';
             
-            if rx_dv = '1' and byte_valid = '1' then
+            if rx_dv_sync2 = '1' and byte_valid_sync2 = '1' then
                 if index < FCS_LEN - 1 then
-                    fcs <= fcs((FCS_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
+                    fcs <= fcs((FCS_LEN-1)*8-1 downto 0) & rgmii_rx_d8_sync;
                     index <= index + 1;
-                elsif index = to_integer(unsigned(data_len)) - 1 then
-                    fcs <= fcs((FCS_LEN-1)*8-1 downto 0) & rgmii_rx_d8;
+                elsif index = FCS_LEN - 1 then
+                    fcs <= fcs((FCS_LEN-1)*8-1 downto 0) & rgmii_rx_d8_sync;
                     index <= 0;
-                    crc_processed <= (others=>'1'); -- initialize computed CRC
-                    next_st <= GET_BYTE;
-                elsif index > to_integer(unsigned(data_len)) - 1 then
-                    index <= 0;
-                    reception_error <= '1';
-                    next_st <= IDLE;
-                end if;
-            else
-                index <= 0;
-                reception_error <= '1';
-                next_st <= IDLE;
-            end if;
-        
-        when GET_BYTE =>
-            rx_data_valid <= '0';
-            if index < to_integer(unsigned(frame_length_s)) then
-                byte <= frame((index+1)*8-1 downto index*8);
-                index <= index + 1;
-                bit_count <= 0;
-                next_st <= COMPUTE_CRC;
-            else
-                index <= 0;
-                reception_error <= '1';
-                next_st <= IDLE;
-            end if;
-        
-        when COMPUTE_CRC =>
-            rx_data_valid <= '0';
-            if bit_count < 8 then
-                if (crc_processed(0) xor byte(bit_count)) = '1' then
-                  crc_processed <= (crc_processed(31 downto 1)&'0') xor CRC_POLY_INV;
-                else
-                  crc_processed <= (crc_processed(31 downto 1)&'0');
-                end if;
-                bit_count <= bit_count + 1;
-            elsif bit_count = 8 then
-                if index = to_integer(unsigned(frame_length_s)) then
+                    reception_error <= '0';
                     next_st <= CHECK_CRC;
-                elsif index < to_integer(unsigned(frame_length_s)) then
-                    next_st <= GET_BYTE;
-                else
+                elsif index > FCS_LEN - 1 then
+                    index <= 0;
                     reception_error <= '1';
                     next_st <= IDLE;
                 end if;
+            else
+                index <= 0;
+                reception_error <= '1';
+                next_st <= IDLE;
             end if;
         
         when CHECK_CRC => -- transmit CRC checking result
             rx_data_valid <= '0';
-            if fcs = crc_processed then crc_ok <= '1'; else crc_ok <= '0'; end if;
+            reception_error <= '0';
+            if fcs = not(crc_processed) then crc_ok <= '1'; else crc_ok <= '0'; end if;
             next_st <= IDLE;
             
         end case;
     end process;
 
-    frame_length <= frame_length_s;
-    rx_error <= phy_error or reception_error;
+    -- Handling rx_start and rx_end
+    rx_start_comb <= '1' when (actual_st = RCV_DEST and index = 0 and byte_valid_sync2 = '1') else '0';
+    rx_end_comb <= '1' when (actual_st = RCV_PAYLOAD and index = to_integer(unsigned(data_len)) - 1 and byte_valid_sync2 = '1') else '0';
+    
+    process(clk, rst)
+    begin
+        if rst = '1' then
+            rx_start_seq <= '0';
+            rx_start   <= '0';
+            rx_end_seq <= '0';
+            rx_end   <= '0';
+        elsif rising_edge(clk) then -- allow rx_start and rx_end to stay high only for 1 clock cycle
+            rx_start_seq <= rx_start_comb;
+            rx_start   <= rx_start_comb and not rx_start_seq;
+            rx_end_seq <= rx_end_comb;
+            rx_end   <= rx_end_comb and not rx_end_seq;
+        end if;
+    end process;
+    
+    rx_error <= phy_error_sync2 or reception_error;
 end Behavioral;
