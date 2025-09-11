@@ -102,6 +102,9 @@ begin
     
     process
     begin
+        -- indicate the begining of the transmission
+        rgmii_rx_ctl <= '1';
+        
         -- send preamble
         for i in 0 to 6 loop
             rgmii_rx_d <= x"5";
@@ -112,23 +115,23 @@ begin
         
         -- send SFD
         rgmii_rx_d <= x"5";
-            wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"D";
-            wait for PHY_CLK_PERIOD/2;
+        wait for PHY_CLK_PERIOD/2;
+        rgmii_rx_d <= x"D";
+        wait for PHY_CLK_PERIOD/2;
         
         -- send destination address (0x12 12 12 12 12 12)
         for i in 0 to 5 loop
-            rgmii_rx_d <= x"1";
-            wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"2";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"1";
             wait for PHY_CLK_PERIOD/2;
         end loop;
         
         -- send source address (0xAB AB AB AB AB AB)
         for i in 0 to 5 loop
-            rgmii_rx_d <= x"A";
-            wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"B";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"A";
             wait for PHY_CLK_PERIOD/2;
         end loop;
         
@@ -137,9 +140,9 @@ begin
         wait for PHY_CLK_PERIOD/2;
         rgmii_rx_d <= x"0";
         wait for PHY_CLK_PERIOD/2;
-        rgmii_rx_d <= x"0";
-        wait for PHY_CLK_PERIOD/2;
         rgmii_rx_d <= x"F";
+        wait for PHY_CLK_PERIOD/2;
+        rgmii_rx_d <= x"0";
         wait for PHY_CLK_PERIOD/2;
         
         -- send payload (0x00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F)
@@ -225,6 +228,7 @@ begin
             rgmii_rx_d <= x"E";
             wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"F";
+            wait for PHY_CLK_PERIOD/2;
         else
             wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"0";
@@ -242,7 +246,12 @@ begin
             rgmii_rx_d <= x"6";
             wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"7";
+            wait for PHY_CLK_PERIOD/2;
         end if;
+        
+        -- indicate the end of the transmission
+        rgmii_rx_ctl <= '0';
+        wait for PHY_CLK_PERIOD/2;
     end process;
     
 end Behavioral;

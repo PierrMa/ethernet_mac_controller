@@ -77,8 +77,6 @@ architecture Behavioral of mac_rx is
     signal index : integer range 0 to NB_BYTE_MAX;
     signal data_len : std_logic_vector(LENGTH_LEN*8-1 downto 0);
     signal fcs : std_logic_vector(FCS_LEN*8-1 downto 0);
-    signal byte : std_logic_vector(7 downto 0);
-    signal bit_count : integer range 0 to 8 := 0;
     signal crc_processed : std_logic_vector(31 downto 0);
     signal rx_start_comb, rx_start_seq : std_logic; 
     signal rx_end_comb, rx_end_seq : std_logic; 
@@ -157,17 +155,20 @@ begin
     end process;
     
     -- FSM to handle reception
-    process (clk,rst)
+--    process (clk,rst)
+--    begin
+--        if rst = '1' then
+--            actual_st <= IDLE;
+--        elsif rising_edge(clk) then
+--            actual_st <= next_st;
+--        end if;
+--    end process;
+    
+    process (clk,rst,actual_st,byte_valid_sync2,rx_dv_sync2,rgmii_rx_d8_sync,index,crc_processed,data_len,fcs)
     begin
         if rst = '1' then
             actual_st <= IDLE;
         elsif rising_edge(clk) then
-            actual_st <= next_st;
-        end if;
-    end process;
-    
-    process (actual_st)
-    begin
         case actual_st is
         when IDLE =>
             rx_data_out <= (others=>'0');
@@ -181,7 +182,7 @@ begin
             
             if byte_valid_sync2 = '1' and rx_dv_sync2 = '1' then 
                 index <= index + 1;
-                next_st <= PREAMB;
+                actual_st <= PREAMB;
             else
                 index <= 0;
             end if;
@@ -192,13 +193,13 @@ begin
                     index <= 0; 
                     reception_error <= '0';
                     crc_processed <= (others=>'1'); -- initialize CRC with ones
-                    next_st <= RCV_DEST;
+                    actual_st <= RCV_DEST;
                 elsif rgmii_rx_d8_sync = x"55" and index<PREAMB_LEN+SFD_LEN then -- receive preamble
                     index <= index + 1;
                 end if;
             else
                 reception_error <= '1';
-                next_st <= IDLE;
+                actual_st <= IDLE;
             end if;
         
         when RCV_DEST => -- parse destination address
@@ -214,18 +215,18 @@ begin
                     crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= 0;
                     reception_error <= '0';
-                    next_st <= RCV_SRC;
+                    actual_st <= RCV_SRC;
                 elsif index >DEST_LEN-1 then 
                     index <= 0;
                     reception_error <= '1';
                     rx_data_valid <= '0';
-                    next_st <= IDLE;
+                    actual_st <= IDLE;
                 end if;
             else
                 index <= 0;
                 reception_error <= '1';
                 rx_data_valid <= '0';
-                next_st <= IDLE;
+                actual_st <= IDLE;
             end if;
             
         when RCV_SRC => -- parse source address
@@ -241,18 +242,18 @@ begin
                     crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= 0;
                     reception_error <= '0';
-                    next_st <= RCV_LEN;
+                    actual_st <= RCV_LEN;
                 elsif index >SRC_LEN-1 then 
                     index <= 0;
                     reception_error <= '1';
                     rx_data_valid <= '0';
-                    next_st <= IDLE;
+                    actual_st <= IDLE;
                 end if;
             else
                 index <= 0;
                 reception_error <= '1';
                 rx_data_valid <= '0';
-                next_st <= IDLE;
+                actual_st <= IDLE;
             end if;
             
         when RCV_LEN => -- parse length
@@ -270,18 +271,18 @@ begin
                     crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= 0;
                     reception_error <= '0';
-                    next_st <= RCV_PAYLOAD;
+                    actual_st <= RCV_PAYLOAD;
                 elsif index >LENGTH_LEN-1 then 
                     index <= 0;
                     reception_error <= '1';
                     rx_data_valid <= '0';
-                    next_st <= IDLE;
+                    actual_st <= IDLE;
                 end if;
             else
                 index <= 0;
                 reception_error <= '1';
                 rx_data_valid <= '0';
-                next_st <= IDLE;
+                actual_st <= IDLE;
             end if;
             
         when RCV_PAYLOAD => -- parse payload
@@ -297,18 +298,18 @@ begin
                     crc_processed <= compute_crc32(rgmii_rx_d8_sync,crc_processed); -- compute CRC
                     index <= 0;
                     reception_error <= '0';
-                    next_st <= RCV_FCS;
+                    actual_st <= RCV_FCS;
                 elsif index > to_integer(unsigned(data_len)) - 1 then
                     index <= 0;
                     reception_error <= '1';
                     rx_data_valid <= '0';
-                    next_st <= IDLE;
+                    actual_st <= IDLE;
                 end if;
             else
                 index <= 0;
                 reception_error <= '1';
                 rx_data_valid <= '0';
-                next_st <= IDLE;
+                actual_st <= IDLE;
             end if;
             
         when RCV_FCS => -- parse FCS
@@ -324,25 +325,26 @@ begin
                     fcs <= fcs((FCS_LEN-1)*8-1 downto 0) & rgmii_rx_d8_sync;
                     index <= 0;
                     reception_error <= '0';
-                    next_st <= CHECK_CRC;
+                    actual_st <= CHECK_CRC;
                 elsif index > FCS_LEN - 1 then
                     index <= 0;
                     reception_error <= '1';
-                    next_st <= IDLE;
+                    actual_st <= IDLE;
                 end if;
             else
                 index <= 0;
                 reception_error <= '1';
-                next_st <= IDLE;
+                actual_st <= IDLE;
             end if;
         
         when CHECK_CRC => -- transmit CRC checking result
             rx_data_valid <= '0';
             reception_error <= '0';
             if fcs = not(crc_processed) then crc_ok <= '1'; else crc_ok <= '0'; end if;
-            next_st <= IDLE;
+            actual_st <= IDLE;
             
         end case;
+        end if;
     end process;
 
     -- Handling rx_start and rx_end
