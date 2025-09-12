@@ -65,11 +65,11 @@ constant RIGHT_FCS : bit :='1'; -- '1' to send the correct FCS, '0' otherwise
 
 -- SIGNALS
 signal clk, rst : std_logic := '1';
-signal rgmii_rx_d : std_logic_vector(3 downto 0);
-signal rgmii_rx_ctl : std_logic;
+signal rgmii_rx_d : std_logic_vector(3 downto 0) := (others=>'0');
+signal rgmii_rx_ctl : std_logic := '0';
 signal rgmii_rx_clk : std_logic := '1';
 signal rx_data_out : std_logic_vector(7 downto 0);
-signal rx_data_valid : std_logic;
+signal rx_data_valid : std_logic := '0';
 signal rx_error : std_logic;
 signal rx_start : std_logic;
 signal rx_end : std_logic;
@@ -102,8 +102,8 @@ begin
     
     process
     begin
-        -- indicate the begining of the transmission
-        rgmii_rx_ctl <= '1';
+        wait for PHY_CLK_PERIOD*2.75; -- do nothing during reset
+        rgmii_rx_ctl <= '1'; --indicate the begining of the transmission
         
         -- send preamble
         for i in 0 to 6 loop
@@ -209,10 +209,10 @@ begin
         rgmii_rx_d <= x"0";
         wait for PHY_CLK_PERIOD/2;
         rgmii_rx_d <= x"F";
+        wait for PHY_CLK_PERIOD/2;
         
         -- send FCS (0x0B 0xC9 0xBA 0xEF) correct value
         if RIGHT_FCS = '1' then
-            wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"0";
             wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"B";
@@ -230,7 +230,6 @@ begin
             rgmii_rx_d <= x"F";
             wait for PHY_CLK_PERIOD/2;
         else
-            wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"0";
             wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"1";
