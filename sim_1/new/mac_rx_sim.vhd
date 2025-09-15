@@ -114,33 +114,33 @@ begin
         end loop;
         
         -- send SFD
-        rgmii_rx_d <= x"5";
-        wait for PHY_CLK_PERIOD/2;
         rgmii_rx_d <= x"D";
+        wait for PHY_CLK_PERIOD/2;
+        rgmii_rx_d <= x"5";
         wait for PHY_CLK_PERIOD/2;
         
         -- send destination address (0x12 12 12 12 12 12)
         for i in 0 to 5 loop
-            rgmii_rx_d <= x"2";
-            wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"1";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"2";
             wait for PHY_CLK_PERIOD/2;
         end loop;
         
         -- send source address (0xAB AB AB AB AB AB)
         for i in 0 to 5 loop
-            rgmii_rx_d <= x"B";
-            wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"A";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"B";
             wait for PHY_CLK_PERIOD/2;
         end loop;
         
-        -- send length (0x00 0F)
+        -- send length (0x00 10)
         rgmii_rx_d <= x"0";
         wait for PHY_CLK_PERIOD/2;
         rgmii_rx_d <= x"0";
         wait for PHY_CLK_PERIOD/2;
-        rgmii_rx_d <= x"F";
+        rgmii_rx_d <= x"1";
         wait for PHY_CLK_PERIOD/2;
         rgmii_rx_d <= x"0";
         wait for PHY_CLK_PERIOD/2;
@@ -211,23 +211,23 @@ begin
         rgmii_rx_d <= x"F";
         wait for PHY_CLK_PERIOD/2;
         
-        -- send FCS (0x0B 0xC9 0xBA 0xEF) correct value
+        -- send FCS (0x3E 0x6D 0x5D 0x16) correct value
         if RIGHT_FCS = '1' then
-            rgmii_rx_d <= x"0";
-            wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"B";
-            wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"C";
-            wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"9";
-            wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"B";
-            wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"A";
+            rgmii_rx_d <= x"3";
             wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"E";
             wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"F";
+            rgmii_rx_d <= x"6";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"D";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"5";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"D";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"1";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"6";
             wait for PHY_CLK_PERIOD/2;
         else
             rgmii_rx_d <= x"0";

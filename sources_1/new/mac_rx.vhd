@@ -101,8 +101,8 @@ architecture Behavioral of mac_rx is
         din := unsigned(data);
     
         for i in 0 to 7 loop
-            if ((crc(0) xor din(i)) = '1') then
-                crc := crc(30 downto 0)&'0' xor x"EDB88320"; -- polynôme inversé
+            if ((crc(31) xor din(i)) = '1') then
+                crc := (crc(30 downto 0)&'0') xor x"EDB88320"; -- polynôme inversé
             else
                 crc := crc(30 downto 0)&'0';
             end if;
@@ -175,8 +175,6 @@ begin
         if rst = '1' then
             state <= IDLE;
             rx_data_out <= (others=>'0');
-            rx_start <= '0';
-            rx_end <= '0';
             frame_length <= (others=>'0');
             crc_ok <= '0';
             reception_error <= '0';
@@ -187,8 +185,6 @@ begin
         case state is
         when IDLE =>
             rx_data_out <= (others=>'0');
-            rx_start <= '0';
-            rx_end <= '0';
             frame_length <= (others=>'0');
             crc_ok <= '0';
             reception_error <= '0';
@@ -207,12 +203,12 @@ begin
         when PREAMB => -- detect preamble and sfd
             if empty = '0' then 
                 r_en <= '1';
-                if rgmii_rx_d8_sync = x"D5" and index = PREAMB_LEN+SFD_LEN then -- receive SFD
+                if rgmii_rx_d8_sync = x"D5" and index = PREAMB_LEN+SFD_LEN-1 then -- receive SFD
                     index <= 0; 
                     reception_error <= '0';
                     crc_processed <= (others=>'1'); -- initialize CRC with ones
                     state <= RCV_DEST;
-                elsif rgmii_rx_d8_sync = x"55" and index<PREAMB_LEN+SFD_LEN then -- receive preamble
+                elsif rgmii_rx_d8_sync  = x"55" and index<PREAMB_LEN+SFD_LEN-1 then -- receive preamble
                     index <= index + 1;
                 end if;
             else
@@ -335,7 +331,6 @@ begin
             end if;
             
         when RCV_FCS => -- parse FCS
-            rx_end <= '0';
             frame_length <= std_logic_vector(to_unsigned(DEST_LEN+SRC_LEN+LENGTH_LEN+to_integer(unsigned(data_len)),16));
             rx_data_valid <= '0';
             
