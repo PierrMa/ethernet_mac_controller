@@ -211,7 +211,7 @@ begin
         rgmii_rx_d <= x"F";
         wait for PHY_CLK_PERIOD/2;
         
-        -- send FCS (0x3E 0x6D 0x5D 0x16) correct value
+        -- send FCS ( 0x3E 0x69 0x63 0xA3 = not(0xC1 0x96 0x9C 0x5C)) correct value
         if RIGHT_FCS = '1' then
             rgmii_rx_d <= x"3";
             wait for PHY_CLK_PERIOD/2;
@@ -219,15 +219,15 @@ begin
             wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"6";
             wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"D";
-            wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"5";
-            wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"D";
-            wait for PHY_CLK_PERIOD/2;
-            rgmii_rx_d <= x"1";
+            rgmii_rx_d <= x"9";
             wait for PHY_CLK_PERIOD/2;
             rgmii_rx_d <= x"6";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"3";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"A";
+            wait for PHY_CLK_PERIOD/2;
+            rgmii_rx_d <= x"3";
             wait for PHY_CLK_PERIOD/2;
         else
             rgmii_rx_d <= x"0";

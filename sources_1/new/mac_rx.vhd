@@ -72,15 +72,17 @@ architecture Behavioral of mac_rx is
     signal high_nibble : std_logic_vector(3 downto 0);
     signal rgmii_rx_d8 : std_logic_vector(FIFO_WIDTH-1 downto 0);
     -- for CDC
+    signal w_data : std_logic_vector(FIFO_WIDTH downto 0);
     signal w_en : std_logic;
     signal rgmii_rx_d8_sync : std_logic_vector(FIFO_WIDTH-1 downto 0);
+    signal r_data : std_logic_vector(FIFO_WIDTH downto 0);
     signal r_en : std_logic;
     signal full : std_logic;
     signal empty : std_logic;
     -- for the reception
     signal state : FSM_type;
     signal rx_dv : std_logic;  -- ongoing frame transfert
-    signal phy_error, phy_error_sync1, phy_error_sync2 : std_logic; -- error get from phy in rgmii_rx_ctl
+    signal phy_error, phy_error_sync : std_logic; -- error get from phy in rgmii_rx_ctl
     signal reception_error : std_logic; -- error during reception
     signal index : integer range 0 to NB_BYTE_MAX;
     signal data_len : std_logic_vector(LENGTH_LEN*8-1 downto 0);
@@ -101,10 +103,10 @@ architecture Behavioral of mac_rx is
         din := unsigned(data);
     
         for i in 0 to 7 loop
-            if ((crc(31) xor din(i)) = '1') then
-                crc := (crc(30 downto 0)&'0') xor x"EDB88320"; -- polynôme inversé
+            if ((crc(0) xor din(i)) = '1') then
+                crc := ('0'&crc(31 downto 1)) xor x"EDB88320"; -- right shift and xor with the reflected polynome
             else
-                crc := crc(30 downto 0)&'0';
+                crc := '0'&crc(31 downto 1); -- right shift
             end if;
         end loop;
     
@@ -112,34 +114,27 @@ architecture Behavioral of mac_rx is
     end function;
 begin
      -- crossing clock domain from rgmii_rx_clk to clk
+     --     for rgmii_rx_d and phy_error (included in rgmii_rx_ctl)
     async_fifo_phy2mac : entity work.async_fifo
     generic map(
-        width => FIFO_WIDTH,
+        width => FIFO_WIDTH+1,
         depth => FIFO_DEPTH
     )
     port map(
-        w_data => rgmii_rx_d8,
+        w_data => w_data,
         w_rst => '0',
         w_clk => rgmii_rx_clk,
         w_en => w_en,
-        r_data => rgmii_rx_d8_sync,
+        r_data => r_data,
         r_rst => rst,
         r_clk => clk,
         r_en => r_en,
         full => full,
         empty => empty
     );
-    
-    process(clk,rst)
-    begin
-        if rst = '1' then
-            phy_error_sync1 <= '0';
-            phy_error_sync2 <= '0';
-        elsif rising_edge(clk) then
-            phy_error_sync1  <= phy_error;
-            phy_error_sync2  <= phy_error_sync1;
-        end if;
-    end process;
+    w_data <= phy_error&rgmii_rx_d8;
+    rgmii_rx_d8_sync <= r_data(FIFO_WIDTH-1 downto 0);
+    phy_error_sync <= r_data(r_data'left);
     
     -- Nibble to byte
     process(rgmii_rx_clk)
@@ -341,6 +336,7 @@ begin
                     index <= index + 1;
                 elsif index = FCS_LEN - 1 then
                     fcs <= fcs((FCS_LEN-1)*8-1 downto 0) & rgmii_rx_d8_sync;
+                    --fcs <= rgmii_rx_d8_sync & fcs(31 downto 8);
                     index <= 0;
                     reception_error <= '0';
                     state <= CHECK_CRC;
@@ -384,5 +380,5 @@ begin
         end if;
     end process;
     
-    rx_error <= phy_error_sync2 or reception_error;
+    rx_error <= phy_error_sync or reception_error;
 end Behavioral;
