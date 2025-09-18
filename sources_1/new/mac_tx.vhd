@@ -1,0 +1,599 @@
+----------------------------------------------------------------------------------
+-- Company: 
+-- Engineer: 
+-- 
+-- Create Date: 17.09.2025 10:40:43
+-- Design Name: 
+-- Module Name: mac_tx - Behavioral
+-- Project Name: 
+-- Target Devices: 
+-- Tool Versions: 
+-- Description: 
+-- 
+-- Dependencies: 
+-- 
+-- Revision:
+-- Revision 0.01 - File Created
+-- Additional Comments:
+-- 
+----------------------------------------------------------------------------------
+
+
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.NUMERIC_STD.ALL;
+Library UNISIM;
+use UNISIM.vcomponents.all;
+
+entity mac_tx is
+Port ( 
+    -- MAC signals
+    clk : std_logic;
+    rst : std_logic;
+    -- System interface
+    tx_clk : in std_logic;
+    tx_rst : in std_logic;
+    tx_data_in : in std_logic_vector(7 downto 0);
+    tx_data_valid : in std_logic;
+    tx_start : in std_logic;
+    tx_end : in std_logic;
+    tx_ready : out std_logic;
+    tx_error : out std_logic;
+    -- PHY interface
+    rgmii_tx_d : out std_logic_vector(3 downto 0);
+    rgmii_tx_ctl : out std_logic;
+    rgmii_tx_clk : out std_logic
+);
+end mac_tx;
+
+architecture Behavioral of mac_tx is
+-- CONSTANTS
+--   fifo dimensions
+constant SYS_FIFO_WIDTH : integer := 10;
+constant SYS_FIFO_DEPTH : integer := 2048;
+constant PHY_FIFO_WIDTH : integer := 4;
+constant PHY_FIFO_DEPTH : integer := 4096;
+--   size for each field of the frame (in nibble)
+constant PREAMB_LEN : integer := 14;
+constant SFD_LEN : integer := 2;
+constant DEST_LEN : integer := 12;
+constant SRC_LEN : integer := 12;
+constant LENGTH_LEN : integer := 4;
+constant PAYLOAD_MAX_LEN : integer := 3000;
+constant FCS_LEN : integer := 8;
+constant NB_BYTE_MAX : integer := 1514;
+constant NB_BYTE_MIN : integer := 60;
+
+-- TYPES
+type fsm_t is (IDLE, ADD_PREAMB, ADD_SFD, ADD_DEST_ADDR, ADD_SRC_ADDR, ADD_LEN, ADD_PAYLOAD, ADD_PADDIND, ADD_FCS);
+
+-- SIGNALS
+--   async_fifo_sys2mac signals
+signal sys_w_data : std_logic_vector(SYS_FIFO_WIDTH-1 downto 0); -- sys_w_data(9 downto 2) = tx_data_in, sys_w_data(1) = tx_start, sys_w_data(0) = tx_end;
+signal sys_w_data_sync : std_logic_vector(SYS_FIFO_WIDTH-1 downto 0);
+signal mac_r_en : std_logic;
+signal sys2mac_full : std_logic;
+signal sys2mac_empty : std_logic;
+--   FSM signals
+signal actual_st, next_st : fsm_t;
+signal index : integer range 0 to 1500 :=0;
+signal start_build : std_logic;
+signal mac_data_byte : std_logic_vector(7 downto 0);
+signal transmission_err : std_logic;
+signal payload_length : std_logic_vector(LENGTH_LEN*4-1 downto 0);
+signal padding_length : integer range 0 to 46;
+signal crc : std_logic_vector(31 downto 0) := (others => '1');
+--   clock divider signals
+signal rgmii_tx_clk_s : std_logic;
+--   async_fifo_mac2phy signals
+signal mac_w_data : std_logic_vector(PHY_FIFO_WIDTH-1 downto 0);
+signal mac_w_en : std_logic;
+signal phy_r_en : std_logic;
+signal mac2phy_full : std_logic;
+signal mac2phy_empty : std_logic;
+
+-- FUNCTIONS
+function compute_crc32(
+    data  : std_logic_vector(7 downto 0);
+    crc_in : std_logic_vector(31 downto 0)
+) return std_logic_vector is
+    variable crc  : unsigned(31 downto 0);
+    variable din  : unsigned(7 downto 0);
+begin
+    crc := unsigned(crc_in);
+    din := unsigned(data);
+
+    for i in 0 to 7 loop
+        if ((crc(0) xor din(i)) = '1') then
+            crc := ('0'&crc(31 downto 1)) xor x"EDB88320"; -- right shift and xor with the reflected polynome
+        else
+            crc := '0'&crc(31 downto 1); -- right shift
+        end if;
+    end loop;
+
+    return std_logic_vector(crc);
+end function;
+
+begin
+    sys_w_data(9 downto 2) <= tx_data_in;
+    sys_w_data(1) <= tx_start; 
+    sys_w_data(0) <= tx_end; 
+    -- Async FIFO to handle CDC frome the system to the MAC
+    asyn_fifo_sys2mac : entity work.async_fifo
+    generic map(
+        width => SYS_FIFO_WIDTH,
+        depth => SYS_FIFO_DEPTH)
+    port map(
+        w_data => sys_w_data,
+        w_rst => tx_rst,
+        w_clk => tx_clk,
+        w_en => tx_data_valid,
+        r_data => sys_w_data_sync,
+        r_rst => rst,
+        r_clk => clk,
+        r_en => mac_r_en,
+        full => sys2mac_full,
+        empty => sys2mac_empty);
+    
+    mac_r_en <= '1' when (actual_st /= IDLE) and  (actual_st /= ADD_PREAMB) and (actual_st /= ADD_SFD) and (actual_st /= ADD_PADDIND) and (actual_st /= ADD_FCS) and (index mod 2 = 0) else '0';
+    
+    -- FSM to build the frame
+    process(clk,rst)
+    begin
+        if rst = '1' then actual_st <= IDLE;
+        elsif rising_edge(clk) then actual_st <= next_st;
+        end if;
+    end process;
+    
+    -- States combinatory process
+    process(actual_st,start_build,mac2phy_full,index,sys2mac_empty,payload_length)
+    begin
+        case(actual_st) is
+        when IDLE =>
+            if start_build = '1' then
+                next_st <= ADD_PREAMB;
+            else
+                next_st <= IDLE;
+            end if;
+            
+        when ADD_PREAMB =>
+            if mac2phy_full /= '1' then
+                if index < PREAMB_LEN-1 then 
+                    next_st <= ADD_PREAMB;
+                elsif index = PREAMB_LEN-1 then
+                    next_st <= ADD_SFD;
+                end if;
+            else
+                next_st <= IDLE;
+            end if;
+        
+        when ADD_SFD =>
+            if mac2phy_full /= '1' then
+                if index = 0 then 
+                    next_st <= ADD_SFD;
+                elsif index = 1 then
+                    next_st <= ADD_DEST_ADDR;
+                end if;
+            else
+                next_st <= IDLE;
+            end if;
+            
+        when ADD_DEST_ADDR =>
+            if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                if mac2phy_full /= '1' then -- check if mac2phy fifo is not full
+                    if index = 0 then
+                        if sys_w_data_sync(1) = '1' then -- handling start signal
+                            next_st <= ADD_DEST_ADDR;
+                        else
+                            next_st <= IDLE;
+                        end if;
+                    else
+                        if index = DEST_LEN-1 then
+                            next_st <= ADD_SRC_ADDR;
+                        elsif index < DEST_LEN-1 then
+                            next_st <= ADD_DEST_ADDR;
+                        end if;
+                    end if;
+                else
+                    next_st <= IDLE;
+                end if;
+            else
+                next_st <= IDLE;
+            end if;
+            
+        when ADD_SRC_ADDR =>
+            if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                if mac2phy_full /= '1' then -- check if mac2phy fifo is not full
+                    if index = SRC_LEN-1 then
+                        next_st <= ADD_LEN;
+                    elsif index < SRC_LEN-1 then
+                        next_st <= ADD_SRC_ADDR;
+                    end if;
+                else
+                    next_st <= IDLE;
+                end if;
+            else
+                next_st <= IDLE;
+            end if;
+            
+        when ADD_LEN =>
+            if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                if mac2phy_full /= '1' then -- check if mac2phy fifo is not full
+                    if index = LENGTH_LEN-1 then
+                        -- check if payload size is correct
+                        if to_integer(unsigned(payload_length)) > NB_BYTE_MAX then
+                            next_st <= IDLE;
+                        else
+                            next_st <= ADD_PAYLOAD;
+                        end if;
+                    elsif index < LENGTH_LEN-1 then
+                        next_st <= ADD_LEN;
+                    end if;
+                else
+                    next_st <= IDLE;
+                end if;
+            else
+                next_st <= IDLE;
+            end if;
+                    
+        when ADD_PAYLOAD =>
+            if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                    if to_integer(unsigned(payload_length)) = 0 or index = to_integer(unsigned(payload_length))*2-1 then -- payload null or last index
+                        if to_integer(unsigned(payload_length)) < NB_BYTE_MIN then
+                            next_st <= ADD_PADDIND;
+                        else
+                            next_st <= ADD_FCS;
+                        end if;
+                    elsif index = to_integer(unsigned(payload_length))*2-2 then
+                        if sys_w_data_sync(0) = '1' then -- end of frame signal
+                            next_st <= ADD_PAYLOAD;
+                        else 
+                            next_st <= IDLE;
+                        end if;
+                    elsif index < to_integer(unsigned(payload_length))*2-1 then
+                        next_st <= ADD_PAYLOAD;
+                    end if;             
+                else
+                    next_st <= IDLE;
+                end if;
+            else
+                next_st <= IDLE;
+            end if;
+            
+        when ADD_PADDIND =>
+            if mac2phy_full /= '1' then
+                if index = padding_length-1 then
+                    next_st <= ADD_FCS;
+                elsif index < padding_length-1 then
+                    next_st <= ADD_PADDIND;
+                end if;
+            else
+                next_st <= IDLE;
+            end if;
+            
+        when ADD_FCS => 
+            if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                if index = FCS_LEN-1 then
+                    next_st <= IDLE;
+                elsif index < FCS_LEN-1 then
+                    next_st <= ADD_FCS;
+                end if;
+            else
+                next_st <= IDLE;
+            end if;
+        end case;
+    end process;
+    
+    -- Output combinatory process
+    process(actual_st, sys_w_data_sync, mac2phy_full, index, sys2mac_empty, payload_length)
+    begin
+        case(actual_st) is
+        when IDLE =>
+            tx_ready <= '1';
+            transmission_err <= '0';
+            crc <= (others=>'1');
+            index <= 0;
+            mac_w_en <= '0';
+            
+        when ADD_PREAMB =>
+            tx_ready <= '0';
+            if mac2phy_full /= '1' then
+                mac_w_en <= '1';
+                transmission_err <= '0';
+                if index < PREAMB_LEN-1 then 
+                    mac_w_data <= x"A";
+                    index <= index + 1;
+                elsif index = PREAMB_LEN-1 then
+                    mac_w_data <= x"A";
+                    index <= 0;
+                end if;
+            else
+                mac_w_en <= '0';
+                transmission_err <= '1';
+            end if;
+        
+        when ADD_SFD =>
+            if mac2phy_full /= '1' then
+                mac_w_en <= '1';
+                transmission_err <= '0';
+                if index = 0 then 
+                    mac_w_data <= x"A";
+                    index <= index + 1;
+                elsif index = 1 then
+                    mac_w_data <= x"B";
+                    index <= 0;
+                    crc <= (others=>'1');
+                end if;
+            else
+                mac_w_en <= '0';
+                transmission_err <= '1';
+            end if;
+            
+        when ADD_DEST_ADDR =>
+            if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                    if index = 0 then
+                        if sys_w_data_sync(1) = '1' then -- handling start signal
+                            transmission_err <= '0';
+                            mac_w_en <= '1';
+                            mac_w_data <= sys_w_data_sync(7 downto 4);
+                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                            index <= index+1;
+                        else
+                            transmission_err <= '1';
+                        end if;
+                    else
+                        mac_w_en <= '1';
+                        transmission_err <= '0';
+                        -- byte to nibble transmission
+                        if index mod 2 = 0 then
+                            mac_w_data <= sys_w_data_sync(7 downto 4);
+                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                        elsif index mod 2 = 1 then
+                            mac_w_data <= sys_w_data_sync(3 downto 0);
+                        end if;
+                        
+                        -- handling index
+                        if index = DEST_LEN-1 then
+                            index <= 0;
+                        elsif index < DEST_LEN-1 then
+                            index <= index+1;
+                        end if;
+                    end if;
+                else
+                    mac_w_en <= '0';
+                    transmission_err <= '1';
+                end if;
+            else
+                mac_w_en <= '0';
+                transmission_err <= '1';
+            end if;
+            
+        when ADD_SRC_ADDR =>
+            if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                    mac_w_en <= '1';
+                    transmission_err <= '0';
+                    -- byte to nibble transmission
+                    if index mod 2 = 0 then
+                        mac_w_data <= sys_w_data_sync(7 downto 4);
+                        crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                    elsif index mod 2 = 1 then
+                        mac_w_data <= sys_w_data_sync(3 downto 0);
+                    end if;
+                    
+                    -- handling index
+                    if index = SRC_LEN-1 then
+                        index <= 0;
+                    elsif index < SRC_LEN-1 then
+                        index <= index+1;
+                    end if;
+                else
+                    mac_w_en <= '0';
+                    transmission_err <= '1';
+                end if;
+            else
+                mac_w_en <= '0';
+                transmission_err <= '1';
+            end if;
+            
+        when ADD_LEN =>
+            if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                    mac_w_en <= '1';
+                    -- byte to nibble transmission
+                    if index mod 2 = 0 then
+                        mac_w_data <= sys_w_data_sync(7 downto 4);
+                        crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                        transmission_err <= '0';
+                    elsif index mod 2 = 1 then
+                        mac_w_data <= sys_w_data_sync(3 downto 0);
+                        transmission_err <= '0';
+                    end if;
+                    
+                    -- handling index
+                    if index = LENGTH_LEN-1 then
+                        index <= 0;
+                        -- check if payload size is correct
+                        if to_integer(unsigned(payload_length)) > NB_BYTE_MAX then
+                            transmission_err <= '1';
+                        else
+                            transmission_err <= '0';
+                        end if;
+                    elsif index < LENGTH_LEN-1 then
+                        index <= index+1;
+                    end if;
+                    
+                    -- register payload length to use it into the next state
+                    if index = 0 then payload_length <= sys_w_data_sync&x"00";
+                    elsif index = 2 then payload_length(7 downto 0) <= sys_w_data_sync;
+                    end if;
+                else
+                    mac_w_en <= '0';
+                    transmission_err <= '1';
+                end if;
+            else
+                mac_w_en <= '0';
+                transmission_err <= '1';
+            end if;
+                
+        when ADD_PAYLOAD =>
+            if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                    if to_integer(unsigned(payload_length)) > 0 then
+                        mac_w_en <= '1';
+                        transmission_err <= '0';
+                        -- byte to nibble transmission
+                        if index mod 2 = 0 then
+                            mac_w_data <= sys_w_data_sync(7 downto 4);
+                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                        elsif index mod 2 = 1 then
+                            mac_w_data <= sys_w_data_sync(3 downto 0);
+                        end if;
+                        
+                        -- handling index
+                        if index = to_integer(unsigned(payload_length))*2-1 then
+                            index <= 0;
+                        elsif index = to_integer(unsigned(payload_length))*2-2 then
+                            if sys_w_data_sync(0) = '1' then -- end of frame signal
+                                transmission_err <= '0';
+                            else 
+                                transmission_err <= '1';
+                            end if;
+                        elsif index < to_integer(unsigned(payload_length))*2-1 then
+                            index <= index+1;
+                        end if;
+                    end if;
+                    -- check payload size to decide what is next
+                    if to_integer(unsigned(payload_length)) < NB_BYTE_MIN then
+                        padding_length <= NB_BYTE_MIN - DEST_LEN - SRC_LEN - LENGTH_LEN - to_integer(unsigned(payload_length))*2;
+                    end if;                    
+                else
+                    mac_w_en <= '0';
+                    transmission_err <= '1';
+                end if;
+            else
+                mac_w_en <= '0';
+                transmission_err <= '1';
+            end if;
+            
+        when ADD_PADDIND =>
+            if mac2phy_full /= '1' then
+                -- byte to nibble transmission
+                mac_w_en <= '1';
+                mac_w_data <= x"0";
+                transmission_err <= '0';
+                
+                -- handling index
+                if index = padding_length-1 then
+                    index <= 0;
+                elsif index < padding_length-1 then
+                    index <= index+1;
+                end if;
+                
+                -- compute CRC
+                if index mod 2 = 0 then 
+                    crc <= compute_crc32(x"00",crc);
+                end if;
+            else
+                mac_w_en <= '0';
+                transmission_err <= '1';
+            end if;
+            
+        when ADD_FCS => 
+            if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                mac_w_en <= '1';
+                transmission_err <= '0';
+                -- byte to nibble transmission
+                if index = 0 then
+                    mac_w_data <= crc(7 downto 4);
+                elsif index = 1 then
+                    mac_w_data <= crc(3 downto 0);
+                elsif index = 2 then
+                    mac_w_data <= crc(15 downto 12);
+                elsif index = 3 then
+                    mac_w_data <= crc(11 downto 8);
+                elsif index = 4 then
+                    mac_w_data <= crc(23 downto 20);
+                elsif index = 5 then
+                    mac_w_data <= crc(19 downto 16);
+                elsif index = 6 then
+                    mac_w_data <= crc(31 downto 28);
+                elsif index = 7 then
+                    mac_w_data <= crc(27 downto 24);
+                end if;
+                
+                -- handling index
+                if index = FCS_LEN-1 then
+                    index <= 0;
+                elsif index < FCS_LEN-1 then
+                    index <= index+1;
+                end if;
+            else
+                mac_w_en <= '0';
+                transmission_err <= '1';
+            end if;
+        end case;
+    end process;
+    
+    -- Clock divider
+    PLLE3_BASE_inst : PLLE3_BASE
+       generic map (
+          CLKFBOUT_MULT => 5,         -- Multiply value for all CLKOUT, (1-19)
+          CLKFBOUT_PHASE => 0.0,      -- Phase offset in degrees of CLKFB, (-360.000-360.000)
+          CLKIN_PERIOD => 0.0,        -- Input clock period in ns to ps resolution (i.e., 33.333 is 30 MHz).
+          -- CLKOUT0 Attributes: Divide, Phase and Duty Cycle for the CLKOUT0 output
+          CLKOUT0_DIVIDE => 1,        -- Divide amount for CLKOUT0 (1-128)
+          CLKOUT0_DUTY_CYCLE => 0.5,  -- Duty cycle for CLKOUT0 (0.001-0.999)
+          CLKOUT0_PHASE => 0.0,       -- Phase offset for CLKOUT0 (-360.000-360.000)
+          -- CLKOUT1 Attributes: Divide, Phase and Duty Cycle for the CLKOUT1 output
+          CLKOUT1_DIVIDE => 1,        -- Divide amount for CLKOUT1 (1-128)
+          CLKOUT1_DUTY_CYCLE => 0.5,  -- Duty cycle for CLKOUT1 (0.001-0.999)
+          CLKOUT1_PHASE => 0.0,       -- Phase offset for CLKOUT1 (-360.000-360.000)
+          CLKOUTPHY_MODE => "VCO_2X", -- Frequency of the CLKOUTPHY (VCO, VCO_2X, VCO_HALF)
+          DIVCLK_DIVIDE => 1,         -- Master division value, (1-15)
+          -- Programmable Inversion Attributes: Specifies built-in programmable inversion on specific pins
+          IS_CLKFBIN_INVERTED => '0', -- Optional inversion for CLKFBIN
+          IS_CLKIN_INVERTED => '0',   -- Optional inversion for CLKIN
+          IS_PWRDWN_INVERTED => '0',  -- Optional inversion for PWRDWN
+          IS_RST_INVERTED => '0',     -- Optional inversion for RST
+          REF_JITTER => 0.0,          -- Reference input jitter in UI (0.000-0.999)
+          STARTUP_WAIT => "FALSE"     -- Delays DONE until PLL is locked (FALSE, TRUE)
+       )
+       port map (
+          -- Clock Outputs outputs: User configurable clock outputs
+          CLKOUT0 => CLKOUT0,         -- 1-bit output: General Clock output
+          CLKOUT0B => CLKOUT0B,       -- 1-bit output: Inverted CLKOUT0
+          CLKOUT1 => CLKOUT1,         -- 1-bit output: General Clock output
+          CLKOUT1B => CLKOUT1B,       -- 1-bit output: Inverted CLKOUT1
+          CLKOUTPHY => CLKOUTPHY,     -- 1-bit output: Bitslice clock
+          -- Feedback Clocks outputs: Clock feedback ports
+          CLKFBOUT => CLKFBOUT,       -- 1-bit output: Feedback clock
+          LOCKED => LOCKED,           -- 1-bit output: LOCK
+          CLKIN => CLKIN,             -- 1-bit input: Input clock
+          -- Control Ports inputs: PLL control ports
+          CLKOUTPHYEN => CLKOUTPHYEN, -- 1-bit input: CLKOUTPHY enable
+          PWRDWN => PWRDWN,           -- 1-bit input: Power-down
+          RST => RST,                 -- 1-bit input: Reset
+          -- Feedback Clocks inputs: Clock feedback ports
+          CLKFBIN => CLKFBIN          -- 1-bit input: Feedback clock
+       );
+    
+    -- Async FIFO to handle CDC from the MAC to the PHY
+    asyn_fifo_mac2phy : entity work.async_fifo
+    generic map(
+        width => PHY_FIFO_WIDTH,
+        depth => PHY_FIFO_DEPTH)
+    port map(
+        w_data => mac_w_data,
+        w_rst => rst,
+        w_clk => clk,
+        w_en => mac_w_en,
+        r_data => rgmii_tx_d,
+        r_rst => '0',
+        r_clk => rgmii_tx_clk_s,
+        r_en => phy_r_en, -- A GERER
+        full => mac2phy_full,
+        empty => mac2phy_empty);
+end Behavioral;
