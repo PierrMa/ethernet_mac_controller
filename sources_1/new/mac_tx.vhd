@@ -64,8 +64,8 @@ constant SRC_LEN : integer := 12;
 constant LENGTH_LEN : integer := 4;
 constant PAYLOAD_MAX_LEN : integer := 3000;
 constant FCS_LEN : integer := 8;
-constant NB_BYTE_MAX : integer := 1514;
-constant NB_BYTE_MIN : integer := 60;
+constant NB_BYTE_MAX : integer := 3028;
+constant NB_BYTE_MIN : integer := 120;
 
 -- TYPES
 type fsm_t is (IDLE, ADD_PREAMB, ADD_SFD, ADD_DEST_ADDR, ADD_SRC_ADDR, ADD_LEN, ADD_PAYLOAD, ADD_PADDING, ADD_FCS);
@@ -187,8 +187,6 @@ begin
                     if index = 0 then
                         if sys_w_data_sync(1) = '1' then -- handling start signal
                             next_st <= ADD_DEST_ADDR;
-                        else
-                            next_st <= IDLE;
                         end if;
                     else
                         if index = DEST_LEN-1 then
@@ -335,20 +333,18 @@ begin
                         if sys_w_data_sync(1) = '1' then -- handling start signal
                             transmission_err <= '0';
                             mac_w_en <= '1';
-                            mac_w_data <= sys_w_data_sync(7 downto 4);
+                            mac_w_data <= sys_w_data_sync(9 downto 6);
                             crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
-                        else
-                            transmission_err <= '1';
                         end if;
                     else
                         mac_w_en <= '1';
                         transmission_err <= '0';
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
-                            mac_w_data <= sys_w_data_sync(7 downto 4);
+                            mac_w_data <= sys_w_data_sync(9 downto 6);
                             crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                         elsif index mod 2 = 1 then
-                            mac_w_data <= sys_w_data_sync(3 downto 0);
+                            mac_w_data <= sys_w_data_sync(5 downto 2);
                         end if;
                     end if;
                 else
@@ -367,10 +363,10 @@ begin
                     transmission_err <= '0';
                     -- byte to nibble transmission
                     if index mod 2 = 0 then
-                        mac_w_data <= sys_w_data_sync(7 downto 4);
+                        mac_w_data <= sys_w_data_sync(9 downto 6);
                         crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                     elsif index mod 2 = 1 then
-                        mac_w_data <= sys_w_data_sync(3 downto 0);
+                        mac_w_data <= sys_w_data_sync(5 downto 2);
                     end if;
                 else
                     mac_w_en <= '0';
@@ -387,11 +383,11 @@ begin
                     mac_w_en <= '1';
                     -- byte to nibble transmission
                     if index mod 2 = 0 then
-                        mac_w_data <= sys_w_data_sync(7 downto 4);
+                        mac_w_data <= sys_w_data_sync(9 downto 6);
                         crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                         transmission_err <= '0';
                     elsif index mod 2 = 1 then
-                        mac_w_data <= sys_w_data_sync(3 downto 0);
+                        mac_w_data <= sys_w_data_sync(5 downto 2);
                         transmission_err <= '0';
                     end if;
                     
@@ -426,10 +422,10 @@ begin
                         transmission_err <= '0';
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
-                            mac_w_data <= sys_w_data_sync(7 downto 4);
+                            mac_w_data <= sys_w_data_sync(9 downto 6);
                             crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                         elsif index mod 2 = 1 then
-                            mac_w_data <= sys_w_data_sync(3 downto 0);
+                            mac_w_data <= sys_w_data_sync(5 downto 2);
                         end if;
                         
                         -- handling index
