@@ -80,11 +80,9 @@ signal sys2mac_empty : std_logic;
 --   FSM signals
 signal actual_st, next_st : fsm_t;
 signal index : integer range 0 to 1500 :=0;
-signal start_build : std_logic;
-signal mac_data_byte : std_logic_vector(7 downto 0);
 signal transmission_err : std_logic;
-signal payload_length : std_logic_vector(LENGTH_LEN*4-1 downto 0);
-signal padding_length : integer range 0 to 46;
+signal payload_length : std_logic_vector(LENGTH_LEN*4-1 downto 0) := (others=>'0');
+signal padding_length : integer range 0 to 46 := 0;
 signal crc : std_logic_vector(31 downto 0) := (others => '1');
 --   clock divider signals
 signal rgmii_tx_clk_s : std_logic;
@@ -94,6 +92,7 @@ signal mac_w_en : std_logic;
 signal phy_r_en : std_logic;
 signal mac2phy_full : std_logic;
 signal mac2phy_empty : std_logic;
+signal mac2phy_index : integer range 0 to 3052 :=0; -- 3052 = (max size of a frame)*2 = 1526*2
 
 -- FUNCTIONS
 function compute_crc32(
@@ -150,11 +149,11 @@ begin
     end process;
     
     --   states combinatory process
-    process(actual_st,start_build,mac2phy_full,index,sys2mac_empty,payload_length)
+    process(actual_st,mac2phy_empty,mac2phy_full,index,sys2mac_empty,payload_length)
     begin
         case(actual_st) is
         when IDLE =>
-            if start_build = '1' then
+            if mac2phy_empty = '1' then -- each time mac2phy FIFO is empty, write PREAMBULE + SFD into it
                 next_st <= ADD_PREAMB;
             else
                 next_st <= IDLE;
@@ -546,7 +545,7 @@ begin
        generic map (
           CLKFBOUT_MULT => 5,         -- Multiply value for all CLKOUT, (1-19)
           CLKFBOUT_PHASE => 0.0,      -- Phase offset in degrees of CLKFB, (-360.000-360.000)
-          CLKIN_PERIOD => 0.0,        -- Input clock period in ns to ps resolution (i.e., 33.333 is 30 MHz).
+          CLKIN_PERIOD => 5.0,        -- Input clock period in ns to ps resolution (i.e., 33.333 is 30 MHz).
           -- CLKOUT0 Attributes: Divide, Phase and Duty Cycle for the CLKOUT0 output
           CLKOUT0_DIVIDE => 8,        -- Divide amount for CLKOUT0 (1-128)
           CLKOUT0_DUTY_CYCLE => 0.5,  -- Duty cycle for CLKOUT0 (0.001-0.999)
@@ -597,26 +596,45 @@ begin
         r_data => rgmii_tx_d,
         r_rst => '0',
         r_clk => rgmii_tx_clk_s,
-        r_en => phy_r_en, -- A GERER
+        r_en => phy_r_en,
         full => mac2phy_full,
         empty => mac2phy_empty);
         
     rgmii_tx_clk <= rgmii_tx_clk_s;
     
-    -- process to transmit the nibble to the RGMII and handle rgmii_tx_ctl
+    -- process to handle the reading of mac2phy fifo
     process (rgmii_tx_clk_s)
     begin
         if rising_edge(rgmii_tx_clk_s) then 
             if(mac2phy_empty = '0') then 
-                phy_r_en <= '1';
-                rgmii_tx_ctl <= '1';
+                if(sys_w_data_sync(0)='1') then -- if there is a full tram into sys2mac fifo
+                    phy_r_en <= '1';
+                end if;
+            end if;
+        end if;
+        if falling_edge(rgmii_tx_clk_s) then 
+            if(mac2phy_index = 1) then 
+                phy_r_en <= '0';
             end if;
         end if;
     end process;
+    
+    -- process to handle rgmii_tx_ctl and index
     process (rgmii_tx_clk_s)
     begin
-        if falling_edge(rgmii_tx_clk_s) then 
-            rgmii_tx_ctl <= phy_r_en xor transmission_err;
+        if rising_edge(rgmii_tx_clk_s) then 
+            if (mac2phy_empty = '0') and (sys_w_data_sync(0)='1') then
+                mac2phy_index <= PREAMB_LEN + SFD_LEN + DEST_LEN + SRC_LEN + LENGTH_LEN + to_integer(unsigned(payload_length)) + padding_length + FCS_LEN;
+            end if;
+            if(mac2phy_empty = '0') and (phy_r_en = '1') then
+                rgmii_tx_ctl <= '1'; 
+                mac2phy_index <= mac2phy_index - 1;
+            end if;
+        elsif falling_edge(rgmii_tx_clk_s) then 
+            if(mac2phy_empty = '0') and (phy_r_en = '1') then
+                rgmii_tx_ctl <= '1'; 
+                mac2phy_index <= mac2phy_index - 1;
+            end if;
         end if;
     end process;
     tx_error <= transmission_err;
