@@ -1,11 +1,11 @@
 ----------------------------------------------------------------------------------
--- Company: 
--- Engineer: 
+-- Company: Pierrelec
+-- Engineer: FREDERIC Pierre-Marie
 -- 
 -- Create Date: 10.09.2025 23:38:58
 -- Design Name: 
 -- Module Name: mac_rx_sim - Behavioral
--- Project Name: 
+-- Project Name: Ethernet MAC Controller
 -- Target Devices: 
 -- Tool Versions: 
 -- Description: 

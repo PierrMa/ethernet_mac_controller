@@ -5,7 +5,7 @@
 -- Create Date: 17.09.2025 10:40:43
 -- Design Name: 
 -- Module Name: mac_tx - Behavioral
--- Project Name: 
+-- Project Name: Ethernet MAC Controller
 -- Target Devices: 
 -- Tool Versions: 
 -- Description: 
@@ -342,7 +342,7 @@ begin
                             transmission_err <= '0';
                             mac_w_en <= '1';
                             mac_w_data <= sys_w_data_sync(7 downto 4);
-                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                            crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                             index <= index+1;
                         else
                             transmission_err <= '1';
@@ -353,7 +353,7 @@ begin
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
                             mac_w_data <= sys_w_data_sync(7 downto 4);
-                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                            crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                         elsif index mod 2 = 1 then
                             mac_w_data <= sys_w_data_sync(3 downto 0);
                         end if;
@@ -382,7 +382,7 @@ begin
                     -- byte to nibble transmission
                     if index mod 2 = 0 then
                         mac_w_data <= sys_w_data_sync(7 downto 4);
-                        crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                        crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                     elsif index mod 2 = 1 then
                         mac_w_data <= sys_w_data_sync(3 downto 0);
                     end if;
@@ -409,7 +409,7 @@ begin
                     -- byte to nibble transmission
                     if index mod 2 = 0 then
                         mac_w_data <= sys_w_data_sync(7 downto 4);
-                        crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                        crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                         transmission_err <= '0';
                     elsif index mod 2 = 1 then
                         mac_w_data <= sys_w_data_sync(3 downto 0);
@@ -430,8 +430,8 @@ begin
                     end if;
                     
                     -- register payload length to use it into the next state
-                    if index = 0 then payload_length <= sys_w_data_sync&x"00";
-                    elsif index = 2 then payload_length(7 downto 0) <= sys_w_data_sync;
+                    if index = 0 then payload_length <= sys_w_data_sync(9 downto 2)&x"00";
+                    elsif index = 2 then payload_length(7 downto 0) <= sys_w_data_sync(9 downto 2);
                     end if;
                 else
                     mac_w_en <= '0';
@@ -451,7 +451,7 @@ begin
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
                             mac_w_data <= sys_w_data_sync(7 downto 4);
-                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                            crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                         elsif index mod 2 = 1 then
                             mac_w_data <= sys_w_data_sync(3 downto 0);
                         end if;
