@@ -296,7 +296,6 @@ begin
             tx_ready <= '1';
             transmission_err <= '0';
             crc <= (others=>'1');
-            index <= 0;
             mac_w_en <= '0';
             
         when ADD_PREAMB =>
@@ -306,10 +305,8 @@ begin
                 transmission_err <= '0';
                 if index < PREAMB_LEN-1 then 
                     mac_w_data <= x"A";
-                    index <= index + 1;
                 elsif index = PREAMB_LEN-1 then
                     mac_w_data <= x"A";
-                    index <= 0;
                 end if;
             else
                 mac_w_en <= '0';
@@ -322,10 +319,8 @@ begin
                 transmission_err <= '0';
                 if index = 0 then 
                     mac_w_data <= x"A";
-                    index <= index + 1;
                 elsif index = 1 then
                     mac_w_data <= x"B";
-                    index <= 0;
                     crc <= (others=>'1');
                 end if;
             else
@@ -342,7 +337,6 @@ begin
                             mac_w_en <= '1';
                             mac_w_data <= sys_w_data_sync(7 downto 4);
                             crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
-                            index <= index+1;
                         else
                             transmission_err <= '1';
                         end if;
@@ -355,13 +349,6 @@ begin
                             crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                         elsif index mod 2 = 1 then
                             mac_w_data <= sys_w_data_sync(3 downto 0);
-                        end if;
-                        
-                        -- handling index
-                        if index = DEST_LEN-1 then
-                            index <= 0;
-                        elsif index < DEST_LEN-1 then
-                            index <= index+1;
                         end if;
                     end if;
                 else
@@ -384,13 +371,6 @@ begin
                         crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
                     elsif index mod 2 = 1 then
                         mac_w_data <= sys_w_data_sync(3 downto 0);
-                    end if;
-                    
-                    -- handling index
-                    if index = SRC_LEN-1 then
-                        index <= 0;
-                    elsif index < SRC_LEN-1 then
-                        index <= index+1;
                     end if;
                 else
                     mac_w_en <= '0';
@@ -417,15 +397,12 @@ begin
                     
                     -- handling index
                     if index = LENGTH_LEN-1 then
-                        index <= 0;
                         -- check if payload size is correct
                         if to_integer(unsigned(payload_length)) > NB_BYTE_MAX then
                             transmission_err <= '1';
                         else
                             transmission_err <= '0';
                         end if;
-                    elsif index < LENGTH_LEN-1 then
-                        index <= index+1;
                     end if;
                     
                     -- register payload length to use it into the next state
@@ -456,16 +433,12 @@ begin
                         end if;
                         
                         -- handling index
-                        if index = to_integer(unsigned(payload_length))*2-1 then
-                            index <= 0;
-                        elsif index = to_integer(unsigned(payload_length))*2-2 then
+                        if index = to_integer(unsigned(payload_length))*2-2 then
                             if sys_w_data_sync(0) = '1' then -- end of frame signal
                                 transmission_err <= '0';
                             else 
                                 transmission_err <= '1';
                             end if;
-                        elsif index < to_integer(unsigned(payload_length))*2-1 then
-                            index <= index+1;
                         end if;
                     end if;
                     -- check payload size to decide what is next
@@ -487,13 +460,6 @@ begin
                 mac_w_en <= '1';
                 mac_w_data <= x"0";
                 transmission_err <= '0';
-                
-                -- handling index
-                if index = padding_length-1 then
-                    index <= 0;
-                elsif index < padding_length-1 then
-                    index <= index+1;
-                end if;
                 
                 -- compute CRC
                 if index mod 2 = 0 then 
@@ -526,18 +492,110 @@ begin
                 elsif index = 7 then
                     mac_w_data <= crc(27 downto 24);
                 end if;
-                
-                -- handling index
-                if index = FCS_LEN-1 then
-                    index <= 0;
-                elsif index < FCS_LEN-1 then
-                    index <= index+1;
-                end if;
             else
                 mac_w_en <= '0';
                 transmission_err <= '1';
             end if;
         end case;
+    end process;
+    
+    --   process to handle index
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            case(actual_st) is
+            when IDLE =>
+                index <= 0;
+                
+            when ADD_PREAMB =>
+                if mac2phy_full /= '1' then
+                    if index < PREAMB_LEN-1 then 
+                        index <= index + 1;
+                    elsif index = PREAMB_LEN-1 then
+                        index <= 0;
+                    end if;
+                end if;
+            
+            when ADD_SFD =>
+                if mac2phy_full /= '1' then
+                    if index = 0 then 
+                        index <= index + 1;
+                    elsif index = 1 then
+                        index <= 0;
+                    end if;
+                end if;
+                
+            when ADD_DEST_ADDR =>
+                if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                    if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                        if index = 0 then
+                            if sys_w_data_sync(1) = '1' then -- handling start signal
+                                index <= index+1;
+                            end if;
+                        else
+                            if index = DEST_LEN-1 then
+                                index <= 0;
+                            elsif index < DEST_LEN-1 then
+                                index <= index+1;
+                            end if;
+                        end if;
+                    end if;
+                end if;
+                
+            when ADD_SRC_ADDR =>
+                if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                    if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                        if index = SRC_LEN-1 then
+                            index <= 0;
+                        elsif index < SRC_LEN-1 then
+                            index <= index+1;
+                        end if;
+                    end if;
+                end if;
+                
+            when ADD_LEN =>
+                if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                    if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                        if index = LENGTH_LEN-1 then
+                            index <= 0;
+                        elsif index < LENGTH_LEN-1 then
+                            index <= index+1;
+                        end if;
+                    end if;
+                end if;
+                    
+            when ADD_PAYLOAD =>
+                if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
+                    if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                        if to_integer(unsigned(payload_length)) > 0 then
+                            if index = to_integer(unsigned(payload_length))*2-1 then
+                                index <= 0;
+                            elsif index < to_integer(unsigned(payload_length))*2-1 then
+                                index <= index+1;
+                            end if;
+                        end if;
+                    end if;
+                end if;
+                
+            when ADD_PADDING =>
+                if mac2phy_full /= '1' then
+                    if index = padding_length-1 then
+                        index <= 0;
+                    elsif index < padding_length-1 then
+                        index <= index+1;
+                    end if;
+                end if;
+                
+            when ADD_FCS => 
+                if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
+                    if index = FCS_LEN-1 then
+                        index <= 0;
+                    elsif index < FCS_LEN-1 then
+                        index <= index+1;
+                    end if;
+                end if;
+            end case;
+        end if;
     end process;
     
     -- PLL to generate a 125MHz clock for RGMII from MAC clock
