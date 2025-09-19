@@ -1,6 +1,6 @@
 ----------------------------------------------------------------------------------
--- Company: 
--- Engineer: 
+-- Company: Pierrelec
+-- Engineer: FREDERIC Pierre-Marie
 -- 
 -- Create Date: 17.09.2025 10:40:43
 -- Design Name: 
@@ -42,7 +42,10 @@ Port (
     -- PHY interface
     rgmii_tx_d : out std_logic_vector(3 downto 0);
     rgmii_tx_ctl : out std_logic;
-    rgmii_tx_clk : out std_logic
+    rgmii_tx_clk : out std_logic;
+    -- debub
+    pll_lock : out std_logic;
+    clkfbout : out std_logic
 );
 end mac_tx;
 
@@ -65,7 +68,7 @@ constant NB_BYTE_MAX : integer := 1514;
 constant NB_BYTE_MIN : integer := 60;
 
 -- TYPES
-type fsm_t is (IDLE, ADD_PREAMB, ADD_SFD, ADD_DEST_ADDR, ADD_SRC_ADDR, ADD_LEN, ADD_PAYLOAD, ADD_PADDIND, ADD_FCS);
+type fsm_t is (IDLE, ADD_PREAMB, ADD_SFD, ADD_DEST_ADDR, ADD_SRC_ADDR, ADD_LEN, ADD_PAYLOAD, ADD_PADDING, ADD_FCS);
 
 -- SIGNALS
 --   async_fifo_sys2mac signals
@@ -115,11 +118,11 @@ begin
 end function;
 
 begin
+    -- Async FIFO to handle CDC from the system to the MAC
     sys_w_data(9 downto 2) <= tx_data_in;
     sys_w_data(1) <= tx_start; 
     sys_w_data(0) <= tx_end; 
-    -- Async FIFO to handle CDC frome the system to the MAC
-    asyn_fifo_sys2mac : entity work.async_fifo
+    async_fifo_sys2mac : entity work.async_fifo
     generic map(
         width => SYS_FIFO_WIDTH,
         depth => SYS_FIFO_DEPTH)
@@ -135,7 +138,8 @@ begin
         full => sys2mac_full,
         empty => sys2mac_empty);
     
-    mac_r_en <= '1' when (actual_st /= IDLE) and  (actual_st /= ADD_PREAMB) and (actual_st /= ADD_SFD) and (actual_st /= ADD_PADDIND) and (actual_st /= ADD_FCS) and (index mod 2 = 0) else '0';
+    mac_r_en <= '1' when (actual_st /= IDLE) and  (actual_st /= ADD_PREAMB) and (actual_st /= ADD_SFD) and (actual_st /= ADD_PADDING) and (actual_st /= ADD_FCS) 
+    and (index mod 2 = 0) else '0'; -- this condition is because bytes are then treated as nibbles so the high half of a byte is registered when index is even and the low half when index is odd
     
     -- FSM to build the frame
     process(clk,rst)
@@ -145,7 +149,7 @@ begin
         end if;
     end process;
     
-    -- States combinatory process
+    --   states combinatory process
     process(actual_st,start_build,mac2phy_full,index,sys2mac_empty,payload_length)
     begin
         case(actual_st) is
@@ -241,7 +245,7 @@ begin
                 if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
                     if to_integer(unsigned(payload_length)) = 0 or index = to_integer(unsigned(payload_length))*2-1 then -- payload null or last index
                         if to_integer(unsigned(payload_length)) < NB_BYTE_MIN then
-                            next_st <= ADD_PADDIND;
+                            next_st <= ADD_PADDING;
                         else
                             next_st <= ADD_FCS;
                         end if;
@@ -261,12 +265,12 @@ begin
                 next_st <= IDLE;
             end if;
             
-        when ADD_PADDIND =>
+        when ADD_PADDING =>
             if mac2phy_full /= '1' then
                 if index = padding_length-1 then
                     next_st <= ADD_FCS;
                 elsif index < padding_length-1 then
-                    next_st <= ADD_PADDIND;
+                    next_st <= ADD_PADDING;
                 end if;
             else
                 next_st <= IDLE;
@@ -285,7 +289,7 @@ begin
         end case;
     end process;
     
-    -- Output combinatory process
+    --   output combinatory process
     process(actual_st, sys_w_data_sync, mac2phy_full, index, sys2mac_empty, payload_length)
     begin
         case(actual_st) is
@@ -478,7 +482,7 @@ begin
                 transmission_err <= '1';
             end if;
             
-        when ADD_PADDIND =>
+        when ADD_PADDING =>
             if mac2phy_full /= '1' then
                 -- byte to nibble transmission
                 mac_w_en <= '1';
@@ -537,14 +541,14 @@ begin
         end case;
     end process;
     
-    -- Clock divider
+    -- PLL to generate a 125MHz clock for RGMII from MAC clock
     PLLE3_BASE_inst : PLLE3_BASE
        generic map (
           CLKFBOUT_MULT => 5,         -- Multiply value for all CLKOUT, (1-19)
           CLKFBOUT_PHASE => 0.0,      -- Phase offset in degrees of CLKFB, (-360.000-360.000)
           CLKIN_PERIOD => 0.0,        -- Input clock period in ns to ps resolution (i.e., 33.333 is 30 MHz).
           -- CLKOUT0 Attributes: Divide, Phase and Duty Cycle for the CLKOUT0 output
-          CLKOUT0_DIVIDE => 1,        -- Divide amount for CLKOUT0 (1-128)
+          CLKOUT0_DIVIDE => 8,        -- Divide amount for CLKOUT0 (1-128)
           CLKOUT0_DUTY_CYCLE => 0.5,  -- Duty cycle for CLKOUT0 (0.001-0.999)
           CLKOUT0_PHASE => 0.0,       -- Phase offset for CLKOUT0 (-360.000-360.000)
           -- CLKOUT1 Attributes: Divide, Phase and Duty Cycle for the CLKOUT1 output
@@ -563,21 +567,21 @@ begin
        )
        port map (
           -- Clock Outputs outputs: User configurable clock outputs
-          CLKOUT0 => CLKOUT0,         -- 1-bit output: General Clock output
-          CLKOUT0B => CLKOUT0B,       -- 1-bit output: Inverted CLKOUT0
-          CLKOUT1 => CLKOUT1,         -- 1-bit output: General Clock output
-          CLKOUT1B => CLKOUT1B,       -- 1-bit output: Inverted CLKOUT1
-          CLKOUTPHY => CLKOUTPHY,     -- 1-bit output: Bitslice clock
+          CLKOUT0 => rgmii_tx_clk_s,         -- 1-bit output: General Clock output
+          CLKOUT0B => open,       -- 1-bit output: Inverted CLKOUT0
+          CLKOUT1 => open,         -- 1-bit output: General Clock output
+          CLKOUT1B => open,       -- 1-bit output: Inverted CLKOUT1
+          CLKOUTPHY => open,     -- 1-bit output: Bitslice clock
           -- Feedback Clocks outputs: Clock feedback ports
-          CLKFBOUT => CLKFBOUT,       -- 1-bit output: Feedback clock
-          LOCKED => LOCKED,           -- 1-bit output: LOCK
-          CLKIN => CLKIN,             -- 1-bit input: Input clock
+          CLKFBOUT => clkfbout,       -- 1-bit output: Feedback clock
+          LOCKED => pll_lock,           -- 1-bit output: LOCK
+          CLKIN => clk,             -- 1-bit input: Input clock
           -- Control Ports inputs: PLL control ports
-          CLKOUTPHYEN => CLKOUTPHYEN, -- 1-bit input: CLKOUTPHY enable
-          PWRDWN => PWRDWN,           -- 1-bit input: Power-down
-          RST => RST,                 -- 1-bit input: Reset
+          CLKOUTPHYEN => '0', -- 1-bit input: CLKOUTPHY enable
+          PWRDWN => '0',           -- 1-bit input: Power-down
+          RST => rst,                 -- 1-bit input: Reset
           -- Feedback Clocks inputs: Clock feedback ports
-          CLKFBIN => CLKFBIN          -- 1-bit input: Feedback clock
+          CLKFBIN => clk          -- 1-bit input: Feedback clock
        );
     
     -- Async FIFO to handle CDC from the MAC to the PHY
@@ -596,4 +600,24 @@ begin
         r_en => phy_r_en, -- A GERER
         full => mac2phy_full,
         empty => mac2phy_empty);
+        
+    rgmii_tx_clk <= rgmii_tx_clk_s;
+    
+    -- process to transmit the nibble to the RGMII and handle rgmii_tx_ctl
+    process (rgmii_tx_clk_s)
+    begin
+        if rising_edge(rgmii_tx_clk_s) then 
+            if(mac2phy_empty = '0') then 
+                phy_r_en <= '1';
+                rgmii_tx_ctl <= '1';
+            end if;
+        end if;
+    end process;
+    process (rgmii_tx_clk_s)
+    begin
+        if falling_edge(rgmii_tx_clk_s) then 
+            rgmii_tx_ctl <= phy_r_en xor transmission_err;
+        end if;
+    end process;
+    tx_error <= transmission_err;
 end Behavioral;
