@@ -52,7 +52,7 @@ end mac_tx;
 architecture Behavioral of mac_tx is
 -- CONSTANTS
 --   fifo dimensions
-constant SYS_FIFO_WIDTH : integer := 10;
+constant SYS_FIFO_WIDTH : integer := 8;
 constant SYS_FIFO_DEPTH : integer := 2048;
 constant PHY_FIFO_WIDTH : integer := 4;
 constant PHY_FIFO_DEPTH : integer := 4096;
@@ -68,12 +68,13 @@ constant NB_BYTE_MAX : integer := 3028;
 constant NB_BYTE_MIN : integer := 120;
 
 -- TYPES
-type fsm_t is (IDLE, ADD_PREAMB, ADD_SFD, ADD_DEST_ADDR, ADD_SRC_ADDR, ADD_LEN, ADD_PAYLOAD, ADD_PADDING, ADD_FCS, WAIT_FIELD);
+type fsm_t is (IDLE, ADD_PREAMB, ADD_SFD, ADD_DEST_ADDR, ADD_SRC_ADDR, ADD_LEN, ADD_PAYLOAD, ADD_PADDING, ADD_FCS);
 
 -- SIGNALS
---   async_fifo_sys2mac signals
-signal sys_w_data : std_logic_vector(SYS_FIFO_WIDTH-1 downto 0); -- sys_w_data(9 downto 2) = tx_data_in, sys_w_data(1) = tx_start, sys_w_data(0) = tx_end;
+--   async_fifo_sys2mac_data signals
+signal sys_w_data : std_logic_vector(SYS_FIFO_WIDTH-1 downto 0);
 signal sys_w_data_sync : std_logic_vector(SYS_FIFO_WIDTH-1 downto 0);
+signal sys_w_en : std_logic;
 signal mac_r_en : std_logic;
 signal sys2mac_full : std_logic;
 signal sys2mac_empty : std_logic;
@@ -119,9 +120,17 @@ end function;
 
 begin
     -- Async FIFO to handle CDC from the system to the MAC
-    sys_w_data(9 downto 2) <= tx_data_in;
-    sys_w_data(1) <= tx_start; 
-    sys_w_data(0) <= tx_end; 
+    sys_w_data <= tx_data_in;
+    
+    process(tx_rst,tx_data_valid)
+    begin
+        if tx_rst = '1' then sys_w_en <='0';
+        elsif rising_edge(tx_data_valid) and tx_start = '1' then
+            sys_w_en <='1';
+        elsif falling_edge(tx_data_valid) and tx_end = '1' then
+            sys_w_en <='0';
+        end if;
+    end process;
     async_fifo_sys2mac : entity work.async_fifo
     generic map(
         width => SYS_FIFO_WIDTH,
@@ -130,7 +139,7 @@ begin
         w_data => sys_w_data,
         w_rst => tx_rst,
         w_clk => tx_clk,
-        w_en => tx_data_valid,
+        w_en => sys_w_en,
         r_data => sys_w_data_sync,
         r_rst => rst,
         r_clk => clk,
@@ -138,7 +147,7 @@ begin
         full => sys2mac_full,
         empty => sys2mac_empty);
     
-    mac_r_en <= '1' when (state /= IDLE) and  (state /= ADD_PREAMB) and (state /= ADD_SFD) and (state /= ADD_PADDING) and (state /= ADD_FCS) 
+    mac_r_en <= '1' when (state /= IDLE) and  (state /= ADD_PREAMB) and (state /= ADD_SFD) and (state /= ADD_PADDING) and (state /= ADD_FCS)
     and (index mod 2 = 0) else '0'; -- this condition is because bytes are then treated as nibbles so the high half of a byte is registered when index is even and the low half when index is odd
     
     -- FSM to build the frame
@@ -190,7 +199,7 @@ begin
                         mac_w_data <= x"A";
                         index <= index + 1;
                     elsif index = 1 then
-                        state <= WAIT_FIELD;
+                        state <= ADD_DEST_ADDR;
                         
                         mac_w_data <= x"B";
                         crc <= (others=>'1');
@@ -202,37 +211,6 @@ begin
                     
                     mac_w_en <= '0';
                     transmission_err <= '1';
-                end if;
-            
-            when WAIT_FIELD =>
-                if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
-                    if mac2phy_full /= '1' then-- check if mac2phy fifo is not full
-                        if sys_w_data_sync(1) = '1' then -- handling start signal
-                            state <= ADD_DEST_ADDR;
-                            
-                            transmission_err <= '0';
-                            mac_w_en <= '1';
-                            mac_w_data <= sys_w_data_sync(9 downto 6);
-                            crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
-                            
-                            index <= index+1;
-                        else
-                            state <= WAIT_FIELD;
-                            mac_w_en <= '0';
-                            index <= 0;
-                        end if;   
-                    else
-                        state <= IDLE;
-                        mac_w_en <= '0';
-                        transmission_err <= '1';
-                        index <= 0;
-                    end if;
-                else
-                    state <= IDLE;
-                    
-                    mac_w_en <= '0';
-                    transmission_err <= '1';
-                    index <= 0;
                 end if;
                    
             when ADD_DEST_ADDR =>
@@ -251,12 +229,10 @@ begin
                         
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
-                            mac_w_data <= sys_w_data_sync(9 downto 6);
-                            --mac_r_en <= '1';
-                            crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
+                            mac_w_data <= sys_w_data_sync(7 downto 4);
+                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
                         elsif index mod 2 = 1 then
-                            mac_w_data <= sys_w_data_sync(5 downto 2);
-                            --mac_r_en <= '0';
+                            mac_w_data <= sys_w_data_sync(3 downto 0);
                         end if;
                     else
                         state <= IDLE;
@@ -287,10 +263,10 @@ begin
                         
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
-                            mac_w_data <= sys_w_data_sync(9 downto 6);
-                            crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
+                            mac_w_data <= sys_w_data_sync(7 downto 4);
+                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
                         elsif index mod 2 = 1 then
-                            mac_w_data <= sys_w_data_sync(5 downto 2);
+                            mac_w_data <= sys_w_data_sync(3 downto 0);
                         end if;
                     else
                         state <= IDLE;
@@ -327,17 +303,17 @@ begin
                         
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
-                            mac_w_data <= sys_w_data_sync(9 downto 6);
-                            crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
+                            mac_w_data <= sys_w_data_sync(7 downto 4);
+                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
                             transmission_err <= '0';
                         elsif index mod 2 = 1 then
-                            mac_w_data <= sys_w_data_sync(5 downto 2);
+                            mac_w_data <= sys_w_data_sync(3 downto 0);
                             transmission_err <= '0';
                         end if;
                         
                         -- register payload length to use it into the next state
-                        if index = 0 then payload_length <= sys_w_data_sync(9 downto 2)&x"00";
-                        elsif index = 2 then payload_length(7 downto 0) <= sys_w_data_sync(9 downto 2);
+                        if index = 0 then payload_length <= sys_w_data_sync&x"00";
+                        elsif index = 2 then payload_length(7 downto 0) <= sys_w_data_sync;
                         end if;
                         
                     else
@@ -358,12 +334,6 @@ begin
                             else
                                 state <= ADD_FCS;
                             end if;
-                        elsif index = to_integer(unsigned(payload_length))*2-2 then
-                            if sys_w_data_sync(0) = '1' then -- end of frame signal
-                                state <= ADD_PAYLOAD;
-                            else 
-                                state <= IDLE;
-                            end if;
                         elsif index < to_integer(unsigned(payload_length))*2-1 then
                             state <= ADD_PAYLOAD;
                         end if;    
@@ -373,19 +343,10 @@ begin
                             transmission_err <= '0';
                             -- byte to nibble transmission
                             if index mod 2 = 0 then
-                                mac_w_data <= sys_w_data_sync(9 downto 6);
-                                crc <= compute_crc32(sys_w_data_sync(9 downto 2),crc); -- compute CRC
+                                mac_w_data <= sys_w_data_sync(7 downto 4);
+                                crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
                             elsif index mod 2 = 1 then
-                                mac_w_data <= sys_w_data_sync(5 downto 2);
-                            end if;
-                            
-                            -- handling index
-                            if index = to_integer(unsigned(payload_length))*2-2 then
-                                if sys_w_data_sync(0) = '1' then -- end of frame signal
-                                    transmission_err <= '0';
-                                else
-                                    transmission_err <= '1';
-                                end if;
+                                mac_w_data <= sys_w_data_sync(3 downto 0);
                             end if;
                             
                             if index = to_integer(unsigned(payload_length))*2-1 then
@@ -541,9 +502,7 @@ begin
     begin
         if rising_edge(rgmii_tx_clk_s) then 
             if(mac2phy_empty = '0') then 
-                if(sys_w_data_sync(0)='1') then -- if there is a full tram into sys2mac fifo
-                    phy_r_en <= '1';
-                end if;
+                phy_r_en <= '1';
             end if;
         end if;
         if falling_edge(rgmii_tx_clk_s) then 
@@ -557,7 +516,7 @@ begin
     process (rgmii_tx_clk_s)
     begin
         if rising_edge(rgmii_tx_clk_s) then 
-            if (mac2phy_empty = '0') and (sys_w_data_sync(0)='1') then
+            if (mac2phy_empty = '0') then
                 mac2phy_index <= PREAMB_LEN + SFD_LEN + DEST_LEN + SRC_LEN + LENGTH_LEN + to_integer(unsigned(payload_length)) + padding_length + FCS_LEN;
             end if;
             if(mac2phy_empty = '0') and (phy_r_en = '1') then
