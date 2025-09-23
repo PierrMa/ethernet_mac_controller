@@ -52,7 +52,7 @@ end mac_tx;
 architecture Behavioral of mac_tx is
 -- CONSTANTS
 --   fifo dimensions
-constant SYS_FIFO_WIDTH : integer := 8;
+constant SYS_FIFO_WIDTH : integer := 9;
 constant SYS_FIFO_DEPTH : integer := 2048;
 constant PHY_FIFO_WIDTH : integer := 4;
 constant PHY_FIFO_DEPTH : integer := 4096;
@@ -68,14 +68,14 @@ constant NB_BYTE_MAX : integer := 3028;
 constant NB_BYTE_MIN : integer := 120;
 
 -- TYPES
-type fsm_t is (IDLE, ADD_PREAMB, ADD_SFD, ADD_DEST_ADDR, ADD_SRC_ADDR, ADD_LEN, ADD_PAYLOAD, ADD_PADDING, ADD_FCS);
+type fsm_t is (IDLE, ADD_PREAMB, ADD_SFD, WAIT_DATA, ADD_DEST_ADDR, ADD_SRC_ADDR, ADD_LEN, ADD_PAYLOAD, ADD_PADDING, ADD_FCS);
 
 -- SIGNALS
 --   async_fifo_sys2mac_data signals
 signal sys_w_data : std_logic_vector(SYS_FIFO_WIDTH-1 downto 0);
 signal sys_w_data_sync : std_logic_vector(SYS_FIFO_WIDTH-1 downto 0);
-signal sys_w_en : std_logic;
-signal mac_r_en : std_logic;
+signal sys_w_en : std_logic := '0';
+signal mac_r_en : std_logic := '0';
 signal sys2mac_full : std_logic;
 signal sys2mac_empty : std_logic;
 --   FSM signals
@@ -83,18 +83,19 @@ signal state : fsm_t;
 signal index : integer range 0 to 1500 :=0;
 signal transmission_err : std_logic;
 signal payload_length : std_logic_vector(LENGTH_LEN*4-1 downto 0) := (others=>'0');
-signal padding_length : integer range 0 to 46 := 0;
+signal padding_length : integer range 0 to 92 := 0; -- in nibble
 signal crc : std_logic_vector(31 downto 0) := (others => '1');
+signal actual_byte : std_logic_vector(7 downto 0);
 --   async_fifo_mac2phy signals
 signal mac_w_data : std_logic_vector(PHY_FIFO_WIDTH-1 downto 0);
-signal mac_w_en : std_logic;
+signal mac_w_en : std_logic := '0';
 signal phy_r_en : std_logic := '0';
 signal mac2phy_full : std_logic;
 signal mac2phy_empty : std_logic;
-signal mac2phy_index : integer range 0 to 3052 :=0; -- 3052 = (max size of a frame)*2 = 1526*2
-signal rgmii_tx_clk_s : std_logic;
+signal mac2phy_clk : std_logic;
 --   RGMII signal
 signal rgmii_en : std_logic;
+signal rgmii_tx_clk_s : std_logic;
 
 -- FUNCTIONS
 function compute_crc32(
@@ -119,18 +120,11 @@ begin
 end function;
 
 begin
-    -- Async FIFO to handle CDC from the system to the MAC
-    sys_w_data <= tx_data_in;
     
-    process(tx_rst,tx_data_valid)
-    begin
-        if tx_rst = '1' then sys_w_en <='0';
-        elsif rising_edge(tx_data_valid) and tx_start = '1' then
-            sys_w_en <='1';
-        elsif falling_edge(tx_data_valid) and tx_end = '1' then
-            sys_w_en <='0';
-        end if;
-    end process;
+    sys_w_en <='1' when tx_start = '1'else '0' when tx_end'event and tx_end = '0';
+    sys_w_data(8) <= tx_data_valid;
+    sys_w_data(7 downto 0) <= tx_data_in;
+    -- Async FIFO to handle CDC from the system to the MAC
     async_fifo_sys2mac : entity work.async_fifo
     generic map(
         width => SYS_FIFO_WIDTH,
@@ -173,9 +167,9 @@ begin
                     mac_w_en <= '1';
                     transmission_err <= '0';
                     if index < PREAMB_LEN-1 then 
-                        state <= ADD_PREAMB; -- state
-                        mac_w_data <= x"A"; -- data
-                        index <= index + 1; -- index
+                        state <= ADD_PREAMB; 
+                        mac_w_data <= x"A"; 
+                        index <= index + 1; 
                     elsif index = PREAMB_LEN-1 then
                         state <= ADD_SFD;
                         mac_w_data <= x"A";
@@ -183,10 +177,8 @@ begin
                     end if;
                 else
                     state <= IDLE;
-                    
                     mac_w_en <= '0';
                     transmission_err <= '1';
-                    
                     index <= 0;
                 end if;
             
@@ -199,20 +191,21 @@ begin
                         mac_w_data <= x"A";
                         index <= index + 1;
                     elsif index = 1 then
-                        state <= ADD_DEST_ADDR;
-                        
+                        state <= WAIT_DATA;
                         mac_w_data <= x"B";
                         crc <= (others=>'1');
-                        
                         index <= 0;
                     end if;
                 else
                     state <= IDLE;
-                    
                     mac_w_en <= '0';
                     transmission_err <= '1';
                 end if;
-                   
+            
+            when WAIT_DATA => 
+                state <= ADD_DEST_ADDR;
+                mac_w_en <= '0';   
+            
             when ADD_DEST_ADDR =>
                 if sys2mac_empty /= '1' then -- check if sys2mac fifo is not empty
                     if mac2phy_full /= '1' then -- check if mac2phy fifo is not full
@@ -229,20 +222,19 @@ begin
                         
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
+                            actual_byte <= sys_w_data_sync(7 downto 0);
                             mac_w_data <= sys_w_data_sync(7 downto 4);
-                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                            crc <= compute_crc32(sys_w_data_sync(7 downto 0),crc); -- compute CRC
                         elsif index mod 2 = 1 then
-                            mac_w_data <= sys_w_data_sync(3 downto 0);
+                            mac_w_data <= actual_byte(3 downto 0);
                         end if;
                     else
                         state <= IDLE;
-                        
                         mac_w_en <= '0';
                         transmission_err <= '1';
                     end if;
                 else
                     state <= IDLE;
-                    
                     mac_w_en <= '0';
                     transmission_err <= '1';
                 end if;             
@@ -263,10 +255,11 @@ begin
                         
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
+                            actual_byte <= sys_w_data_sync(7 downto 0);
                             mac_w_data <= sys_w_data_sync(7 downto 4);
-                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                            crc <= compute_crc32(sys_w_data_sync(7 downto 0),crc); -- compute CRC
                         elsif index mod 2 = 1 then
-                            mac_w_data <= sys_w_data_sync(3 downto 0);
+                            mac_w_data <= actual_byte(3 downto 0);
                         end if;
                     else
                         state <= IDLE;
@@ -303,17 +296,18 @@ begin
                         
                         -- byte to nibble transmission
                         if index mod 2 = 0 then
+                            actual_byte <= sys_w_data_sync(7 downto 0);
                             mac_w_data <= sys_w_data_sync(7 downto 4);
-                            crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                            crc <= compute_crc32(sys_w_data_sync(7 downto 0),crc); -- compute CRC
                             transmission_err <= '0';
                         elsif index mod 2 = 1 then
-                            mac_w_data <= sys_w_data_sync(3 downto 0);
+                            mac_w_data <= actual_byte(3 downto 0);
                             transmission_err <= '0';
                         end if;
                         
                         -- register payload length to use it into the next state
-                        if index = 0 then payload_length <= sys_w_data_sync&x"00";
-                        elsif index = 2 then payload_length(7 downto 0) <= sys_w_data_sync;
+                        if index = 0 then payload_length <= sys_w_data_sync(7 downto 0)&x"00";
+                        elsif index = 2 then payload_length(7 downto 0) <= sys_w_data_sync(7 downto 0);
                         end if;
                         
                     else
@@ -343,10 +337,11 @@ begin
                             transmission_err <= '0';
                             -- byte to nibble transmission
                             if index mod 2 = 0 then
+                                actual_byte <= sys_w_data_sync(7 downto 0);
                                 mac_w_data <= sys_w_data_sync(7 downto 4);
-                                crc <= compute_crc32(sys_w_data_sync,crc); -- compute CRC
+                                crc <= compute_crc32(sys_w_data_sync(7 downto 0),crc); -- compute CRC
                             elsif index mod 2 = 1 then
-                                mac_w_data <= sys_w_data_sync(3 downto 0);
+                                mac_w_data <= actual_byte(3 downto 0);
                             end if;
                             
                             if index = to_integer(unsigned(payload_length))*2-1 then
@@ -446,7 +441,7 @@ begin
           CLKOUT0_DUTY_CYCLE => 0.5,  -- Duty cycle for CLKOUT0 (0.001-0.999)
           CLKOUT0_PHASE => 0.0,       -- Phase offset for CLKOUT0 (-360.000-360.000)
           -- CLKOUT1 Attributes: Divide, Phase and Duty Cycle for the CLKOUT1 output
-          CLKOUT1_DIVIDE => 1,        -- Divide amount for CLKOUT1 (1-128)
+          CLKOUT1_DIVIDE => 4,        -- Divide amount for CLKOUT1 (1-128)
           CLKOUT1_DUTY_CYCLE => 0.5,  -- Duty cycle for CLKOUT1 (0.001-0.999)
           CLKOUT1_PHASE => 0.0,       -- Phase offset for CLKOUT1 (-360.000-360.000)
           CLKOUTPHY_MODE => "VCO_2X", -- Frequency of the CLKOUTPHY (VCO, VCO_2X, VCO_HALF)
@@ -463,7 +458,7 @@ begin
           -- Clock Outputs outputs: User configurable clock outputs
           CLKOUT0 => rgmii_tx_clk_s,         -- 1-bit output: General Clock output
           CLKOUT0B => open,       -- 1-bit output: Inverted CLKOUT0
-          CLKOUT1 => open,         -- 1-bit output: General Clock output
+          CLKOUT1 => mac2phy_clk,         -- 1-bit output: General Clock output
           CLKOUT1B => open,       -- 1-bit output: Inverted CLKOUT1
           CLKOUTPHY => open,     -- 1-bit output: Bitslice clock
           -- Feedback Clocks outputs: Clock feedback ports
@@ -490,47 +485,28 @@ begin
         w_en => mac_w_en,
         r_data => rgmii_tx_d,
         r_rst => '0',
-        r_clk => rgmii_tx_clk_s,
+        r_clk => mac2phy_clk,
         r_en => phy_r_en,
         full => mac2phy_full,
         empty => mac2phy_empty);
         
     rgmii_tx_clk <= rgmii_tx_clk_s;
+    phy_r_en <= '0' when mac2phy_empty = '1' else '1';
     
-    -- process to handle the reading of mac2phy fifo
+    -- process to handle rgmii_tx_ctl
     process (rgmii_tx_clk_s)
     begin
         if rising_edge(rgmii_tx_clk_s) then 
-            if(mac2phy_empty = '0') then 
-                phy_r_en <= '1';
-            end if;
-        end if;
-        if falling_edge(rgmii_tx_clk_s) then 
-            if(mac2phy_index = 1) then 
-                phy_r_en <= '0';
-            end if;
-        end if;
-    end process;
-    
-    -- process to handle rgmii_tx_ctl and index
-    process (rgmii_tx_clk_s)
-    begin
-        if rising_edge(rgmii_tx_clk_s) then 
-            if (mac2phy_empty = '0') then
-                mac2phy_index <= PREAMB_LEN + SFD_LEN + DEST_LEN + SRC_LEN + LENGTH_LEN + to_integer(unsigned(payload_length)) + padding_length + FCS_LEN;
-            end if;
             if(mac2phy_empty = '0') and (phy_r_en = '1') then
                 rgmii_tx_ctl <= '1';
-                rgmii_en <= '1'; 
-                mac2phy_index <= mac2phy_index - 1;
+                rgmii_en <= '1';
             end if;
         elsif falling_edge(rgmii_tx_clk_s) then 
             if(mac2phy_empty = '0') and (phy_r_en = '1') then
-                rgmii_tx_ctl <= rgmii_en xor transmission_err; 
-                mac2phy_index <= mac2phy_index - 1;
+                rgmii_tx_ctl <= rgmii_en xor transmission_err;
             end if;
         end if;
     end process;
-    tx_ready <= '1' when state = IDLE and sys2mac_full /= '1';
+    tx_ready <= '1' when state = IDLE and sys2mac_full /= '1' else '0';
     tx_error <= transmission_err;
 end Behavioral;

@@ -136,7 +136,6 @@ begin
         tx_end <= '1';
         wait for SYS_PERIOD; 
         tx_data_valid <= '0';
-        wait for SYS_PERIOD;
         tx_end <= '0';
     end process;
     
