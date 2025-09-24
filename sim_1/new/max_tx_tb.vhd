@@ -84,7 +84,7 @@ begin
         tx_start <= '1';
         -- send destination address (0x12 12 12 12 12 12)
         for i in 0 to 5 loop
-            if(i=2) then tx_start <= '0'; end if;
+            if(i=1) then tx_start <= '0'; end if;
             tx_data_in <= x"12";
             wait for SYS_PERIOD;
         end loop;
